@@ -10,5 +10,7 @@ lint-fix:
 	golangci-lint run --fix
 test:
 	go test -v ./... $(ARGS)
+test-race:
+	go test -v ./... -race $(ARGS)
 test-coverage:
 	go test -coverprofile=coverage.out ./...

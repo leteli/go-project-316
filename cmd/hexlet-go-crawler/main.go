@@ -69,6 +69,9 @@ func run() error {
 			}
 			timeout := cmd.String("timeout")
 			d, err := time.ParseDuration(timeout)
+			if err != nil {
+				d = 15 * time.Second
+			}
 			httpClient := &http.Client{
 				Timeout: d,
 			}

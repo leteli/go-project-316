@@ -23,13 +23,17 @@ type Options struct {
 	HTTPClient  *http.Client
 }
 
+var (
+	ErrorInvalidURL = errors.New("invalid url")
+)
+
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if !isValidWebURL(opts.URL) {
-		return nil, errors.New("invalid url")
+		return nil, ErrorInvalidURL
 	}
 	crawler := NewCrawler(opts)
 	report := crawler.GetReport(ctx, 1) // TODO: calculate depth
-	return ToFormattedJSON(report, opts.IndentJSON)
+	return toFormattedJSON(report, opts.IndentJSON)
 }
 
 type Crawler struct {
@@ -117,7 +121,7 @@ func isValidWebURL(rawURL string) bool {
 	return true
 }
 
-func ToFormattedJSON(v Report, indentJSON string) ([]byte, error) {
+func toFormattedJSON(v Report, indentJSON string) ([]byte, error) {
 	payload, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return nil, err
