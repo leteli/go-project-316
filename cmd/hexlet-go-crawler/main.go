@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -74,6 +75,37 @@ func run() error {
 			}
 			httpClient := &http.Client{
 				Timeout: d,
+				Transport: &http.Transport{
+					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+						host, port, err := net.SplitHostPort(addr)
+						if err != nil {
+							return nil, err
+						}
+						ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+						if err != nil {
+							return nil, err
+						}
+						if len(ips) == 0 {
+							return nil, errors.New("no ips detected")
+						}
+						for _, ip := range ips {
+							if ip.IsLoopback() {
+								return nil, fmt.Errorf("ip %s is a loopback address (blocked)", ip)
+							}
+							if ip.IsPrivate() {
+								return nil, fmt.Errorf("ip %s is a private network address (blocked)", ip)
+							}
+							if ip.IsLinkLocalUnicast() {
+								return nil, fmt.Errorf("ip %s is a link-local address (blocked)", ip)
+							}
+						}
+						if ips[0].String() == "" {
+							return nil, errors.New("ip must be resolved")
+						}
+						dialer := &net.Dialer{Timeout: 5 * time.Second}
+						return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+					},
+				},
 			}
 
 			opts := crawler.Options{
