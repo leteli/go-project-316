@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 type Options struct {
@@ -68,6 +70,13 @@ type PageReport struct {
 	Status      string             `json:"status"`
 	Error       string             `json:"error"`
 	BrokenLinks []BrokenLinkReport `json:"broken_links"`
+	SEO         SEO                `json:"seo"`
+}
+
+type BrokenLinkReport struct {
+	URL        string `json:"url"`
+	StatusCode int    `json:"status_code"`
+	Error      string `json:"error"`
 }
 
 type LinkResult struct {
@@ -75,12 +84,6 @@ type LinkResult struct {
 	Kind       string
 	StatusCode int
 	Error      string
-}
-
-type BrokenLinkReport struct {
-	URL        string `json:"url"`
-	StatusCode int    `json:"status_code"`
-	Error      string `json:"error"`
 }
 
 func (c *Crawler) GetReport(ctx context.Context, depth int) Report {
@@ -128,9 +131,17 @@ func (c *Crawler) GetPageReport(ctx context.Context, url string, depth int) Page
 		report.Error = ErrorNotHTML.Error()
 		return report
 	}
+	doc, err := html.Parse(resp.Body)
+	if err != nil {
+		report.Status = "error"
+		report.Error = fmt.Sprintf("parse error: %v", err)
+		return report
+	}
+	report.SEO = AnalyzeSEO(doc)
+
 	resolvedURL := resp.Request.URL
 	links, err := ExtractHTTPLinksFromHTML(
-		resp.Body,
+		doc,
 		resolvedURL.String(),
 	)
 	if err != nil {

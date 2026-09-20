@@ -2,7 +2,6 @@ package crawler
 
 import (
 	"fmt"
-	"io"
 	"net/url"
 	"strings"
 
@@ -21,17 +20,13 @@ var LinkAttrByNode = map[atom.Atom]string{
 	atom.Iframe: "src",
 }
 
-func ExtractHTTPLinksFromHTML(r io.Reader, rawBaseURL string) ([]string, error) {
+func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]string, error) {
 	baseURL, err := url.Parse(rawBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse url %s: %w", rawBaseURL, err)
 	}
 	baseURL = normalizeAbsURL(baseURL)
 
-	doc, err := html.Parse(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse html: %w", err)
-	}
 	var links []string
 
 	uniqueLinks := map[string]struct{}{

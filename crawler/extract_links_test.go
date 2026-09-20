@@ -1,10 +1,11 @@
 package crawler
 
 import (
-	"errors"
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,8 +13,9 @@ import (
 
 func extractedURLs(t *testing.T, markup, base string) []string {
 	t.Helper()
-
-	links, err := ExtractHTTPLinksFromHTML(strings.NewReader(markup), base)
+	doc, err := html.Parse(strings.NewReader(markup))
+	require.NoError(t, err)
+	links, err := ExtractHTTPLinksFromHTML(doc, base)
 	require.NoError(t, err)
 
 	urls := slices.Clone(links)
@@ -137,31 +139,12 @@ func TestExtractHTTPLinksFromHTML(t *testing.T) {
 		}, urls)
 	})
 
-	t.Run("reader error is returned", func(t *testing.T) {
-		readErr := errors.New("test read failure")
-
-		_, err := ExtractHTTPLinksFromHTML(
-			failingReader{err: readErr},
-			documentURL,
-		)
-
-		require.ErrorIs(t, err, readErr)
-	})
-
 	t.Run("malformed base URL is rejected", func(t *testing.T) {
 		_, err := ExtractHTTPLinksFromHTML(
-			strings.NewReader("<html></html>"),
+			&html.Node{Type: html.DocumentNode},
 			"http://[",
 		)
 
 		require.Error(t, err)
 	})
-}
-
-type failingReader struct {
-	err error
-}
-
-func (r failingReader) Read(_ []byte) (int, error) {
-	return 0, r.err
 }
