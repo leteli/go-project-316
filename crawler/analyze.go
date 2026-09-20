@@ -15,7 +15,7 @@ import (
 
 type Options struct {
 	URL         string
-	Depth       int64
+	Depth       int
 	Retries     int64
 	Delay       string
 	Timeout     string
@@ -35,24 +35,39 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.HTTPClient == nil {
 		return nil, ErrorHTTPClientRequired
 	}
-	if !isValidWebURLStr(opts.URL) {
+	u, err := url.Parse(opts.URL)
+	if err != nil || !isValidWebURL(u) {
 		return nil, ErrorInvalidURL
 	}
-	crawler := NewCrawler(opts)
-	report := crawler.GetReport(ctx, 1) // TODO: calculate depth
+	crawler := NewCrawler(opts, u)
+	report := crawler.GetReport(ctx)
 	return toFormattedJSON(report)
 }
 
-type Crawler struct {
-	client     *http.Client
-	URL        string
-	PagesQueue []string
+type PageData struct {
+	URL   string
+	Depth int
 }
 
-func NewCrawler(opts Options) *Crawler {
+type Crawler struct {
+	client                *http.Client
+	URL                   string
+	ParsedRootURL         *url.URL
+	PagesQueue            []PageData
+	uniqueActivePageLinks map[string]struct{}
+	MaxDepth              int
+}
+
+func NewCrawler(opts Options, root *url.URL) *Crawler {
 	return &Crawler{
-		client: opts.HTTPClient,
-		URL:    opts.URL,
+		client:        opts.HTTPClient,
+		URL:           opts.URL,
+		ParsedRootURL: root,
+		MaxDepth:      opts.Depth,
+		PagesQueue:    []PageData{{URL: opts.URL, Depth: 0}},
+		uniqueActivePageLinks: map[string]struct{}{
+			normalizeAbsURL(root).String(): {},
+		},
 	}
 }
 
@@ -86,24 +101,26 @@ type LinkResult struct {
 	Error      string
 }
 
-func (c *Crawler) GetReport(ctx context.Context, depth int) Report {
-	pageReport := c.GetPageReport(ctx, c.URL, 0)
+func (c *Crawler) GetReport(ctx context.Context) Report {
+	pageReports := c.RunPageReportsQueue(ctx)
+
 	report := Report{
 		RootURL:     c.URL,
-		Depth:       depth,
+		Depth:       c.MaxDepth,
 		GeneratedAt: time.Now().Truncate(time.Second),
-		Pages:       []PageReport{pageReport},
+		Pages:       pageReports,
 	}
 	return report
 }
 
-func (c *Crawler) GetPageReport(ctx context.Context, url string, depth int) PageReport {
+func (c *Crawler) GetPageReport(ctx context.Context, link string, depth int) PageReport {
 	report := PageReport{
-		URL:         url,
+		URL:         link,
 		Depth:       depth,
 		BrokenLinks: make([]BrokenLinkReport, 0),
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
 	if err != nil {
 		report.Status = "error"
 		report.Error = fmt.Sprintf("error creating request: %v", err)
@@ -158,7 +175,7 @@ func (c *Crawler) GetPageReport(ctx context.Context, url string, depth int) Page
 			return report
 		}
 
-		linkRes := c.CheckExtractedLink(ctx, link, resolvedURL)
+		linkRes := c.CheckExtractedLink(ctx, link, depth)
 
 		if err := ctx.Err(); err != nil {
 			report.Status = "error"
@@ -177,18 +194,32 @@ func (c *Crawler) GetPageReport(ctx context.Context, url string, depth int) Page
 	return report
 }
 
-func (c *Crawler) CheckExtractedLink(ctx context.Context, link string, base *url.URL) LinkResult {
+func (c *Crawler) RunPageReportsQueue(ctx context.Context) []PageReport {
+	reports := make([]PageReport, 0)
+	for len(c.PagesQueue) > 0 {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		current := c.PagesQueue[0]
+		c.PagesQueue = c.PagesQueue[1:]
+		reports = append(reports, c.GetPageReport(ctx, current.URL, current.Depth))
+	}
+	return reports
+}
+
+func (c *Crawler) CheckExtractedLink(ctx context.Context, link *url.URL, depth int) LinkResult {
 	if ctx.Err() != nil {
 		return LinkResult{}
 	}
-	if !isValidWebURLStr(link) {
+	if !isValidWebURL(link) {
 		return LinkResult{}
 	}
+	linkStr := link.String()
 	// TODO: use goroutines
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, link, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, linkStr, nil)
 	if err != nil {
 		return LinkResult{
-			URL:   link,
+			URL:   linkStr,
 			Kind:  "broken",
 			Error: err.Error(),
 		}
@@ -199,7 +230,7 @@ func (c *Crawler) CheckExtractedLink(ctx context.Context, link string, base *url
 			return LinkResult{}
 		}
 		return LinkResult{
-			URL:   link,
+			URL:   linkStr,
 			Kind:  "broken",
 			Error: err.Error(),
 		}
@@ -210,30 +241,28 @@ func (c *Crawler) CheckExtractedLink(ctx context.Context, link string, base *url
 
 	if resp.StatusCode >= 400 && resp.StatusCode < 600 {
 		return LinkResult{
-			URL:        link,
+			URL:        linkStr,
 			Kind:       "broken",
 			StatusCode: resp.StatusCode,
 			Error:      resp.Status,
 		}
 	}
-	u, _ := url.Parse(link)
 
-	if isHTMLPage(resp) && u.Host == base.Host {
-		c.PagesQueue = append(c.PagesQueue, link)
+	if isHTMLPage(resp) && link.Hostname() == c.ParsedRootURL.Hostname() && depth < c.MaxDepth && c.uniqueActivePageLinks != nil {
+		dedupLink := normalizeAbsURL(link).String()
+		if _, ok := c.uniqueActivePageLinks[dedupLink]; ok {
+			return LinkResult{}
+		}
+		c.PagesQueue = append(
+			c.PagesQueue,
+			PageData{URL: linkStr, Depth: depth + 1},
+		)
+		c.uniqueActivePageLinks[dedupLink] = struct{}{}
 	}
 	return LinkResult{}
 }
 
-func isValidWebURLStr(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	return isValidWebURL(u)
-}
-
 func isValidWebURL(u *url.URL) bool {
-	// TODO: security checks
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}

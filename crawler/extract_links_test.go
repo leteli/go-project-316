@@ -1,7 +1,6 @@
 package crawler
 
 import (
-	"slices"
 	"strings"
 	"testing"
 
@@ -18,7 +17,10 @@ func extractedURLs(t *testing.T, markup, base string) []string {
 	links, err := ExtractHTTPLinksFromHTML(doc, base)
 	require.NoError(t, err)
 
-	urls := slices.Clone(links)
+	urls := make([]string, len(links))
+	for i, l := range links {
+		urls[i] = l.String()
+	}
 	return urls
 }
 

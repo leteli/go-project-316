@@ -20,17 +20,16 @@ var LinkAttrByNode = map[atom.Atom]string{
 	atom.Iframe: "src",
 }
 
-func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]string, error) {
+func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]*url.URL, error) {
 	baseURL, err := url.Parse(rawBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse url %s: %w", rawBaseURL, err)
 	}
-	baseURL = normalizeAbsURL(baseURL)
 
-	var links []string
+	var links []*url.URL
 
 	uniqueLinks := map[string]struct{}{
-		baseURL.String(): {},
+		normalizeAbsURL(baseURL).String(): {},
 	}
 	baseFound := false
 	for n := range doc.Descendants() {
@@ -70,12 +69,12 @@ func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]string, erro
 			}
 			fullLink.Fragment = ""
 			fullLink.RawFragment = ""
-			fullLinkStr := fullLink.String()
-			if _, ok := uniqueLinks[fullLinkStr]; ok {
+			dedupLink := normalizeAbsURL(fullLink).String()
+			if _, ok := uniqueLinks[dedupLink]; ok {
 				break
 			}
-			uniqueLinks[fullLinkStr] = struct{}{}
-			links = append(links, fullLinkStr)
+			uniqueLinks[dedupLink] = struct{}{}
+			links = append(links, fullLink)
 			break
 		}
 	}
@@ -100,5 +99,5 @@ func resolveURL(pathStr string, abs *url.URL) *url.URL {
 		return abs
 	}
 	resolved := abs.ResolveReference(ref)
-	return normalizeAbsURL(resolved)
+	return resolved
 }

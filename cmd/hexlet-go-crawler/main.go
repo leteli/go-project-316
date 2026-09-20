@@ -25,10 +25,16 @@ func run() error {
 		Name:  "hexlet-go-crawler",
 		Usage: "analyze a website structure",
 		Flags: []cli.Flag{
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "depth",
 				Value: 10,
 				Usage: "crawl depth",
+				Action: func(ctx context.Context, cmd *cli.Command, v int) error {
+					if v < 0 {
+						return fmt.Errorf("depth value cannot be negative, received: %v", v)
+					}
+					return nil
+				},
 			},
 			&cli.Int64Flag{
 				Name:  "retries",
@@ -110,7 +116,7 @@ func run() error {
 
 			opts := crawler.Options{
 				URL:     URL,
-				Depth:   cmd.Int64("depth"),
+				Depth:   cmd.Int("depth"),
 				Retries: cmd.Int64("retries"),
 				Delay:   cmd.String("delay"),
 				Timeout: timeout,

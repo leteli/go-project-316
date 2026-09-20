@@ -1,7 +1,7 @@
 ARGS ?=
 
 run:
-	go run ./cmd/hexlet-go-crawler "$(URL)"
+	go run ./cmd/hexlet-go-crawler "$(ARGS)"
 build:
 	go build -o bin/hexlet-go-crawler ./cmd/hexlet-go-crawler
 lint:
