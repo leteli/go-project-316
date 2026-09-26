@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -16,31 +17,35 @@ import (
 type Options struct {
 	URL         string
 	Depth       int
-	Retries     int64
+	Retries     int
 	Delay       string
 	Timeout     string
-	UserAgent   *string
-	Concurrency int64
+	RPS         int
+	Concurrency int
 	IndentJSON  string
 	HTTPClient  *http.Client
 }
 
 var (
-	ErrorInvalidURL         = errors.New("invalid url")
-	ErrorHTTPClientRequired = errors.New("http client is required")
-	ErrorNotHTML            = errors.New("not an HTML page")
+	ErrorInvalidURL          = errors.New("invalid url")
+	ErrorInvalidDepth        = errors.New("invalid depth value")
+	ErrorInvalidDelay        = errors.New("invalid delay value")
+	ErrorInvalidRPS          = errors.New("invalid rps value")
+	ErrorHTTPClientRequired  = errors.New("http client is required")
+	ErrorNotHTML             = errors.New("not an HTML page")
+	ErrorRateLimiterRequired = errors.New("http rate limiter is required")
 )
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
-	if opts.HTTPClient == nil {
-		return nil, ErrorHTTPClientRequired
+	httpRateLimiter, err := newHTTPRateLimiter(opts.HTTPClient, opts.RPS, opts.Delay)
+	if err != nil {
+		return nil, err
 	}
-	u, err := url.Parse(opts.URL)
-	if err != nil || !isValidWebURL(u) {
-		return nil, ErrorInvalidURL
+	crawler, err := newCrawler(opts.URL, opts.Depth, httpRateLimiter)
+	if err != nil {
+		return nil, err
 	}
-	crawler := NewCrawler(opts, u)
-	report := crawler.GetReport(ctx)
+	report := crawler.getReport(ctx)
 	return toFormattedJSON(report)
 }
 
@@ -49,26 +54,77 @@ type PageData struct {
 	Depth int
 }
 
-type Crawler struct {
-	client                *http.Client
-	URL                   string
-	ParsedRootURL         *url.URL
-	PagesQueue            []PageData
-	uniqueActivePageLinks map[string]struct{}
-	MaxDepth              int
+type ReqParams struct {
+	url    string
+	method string
 }
 
-func NewCrawler(opts Options, root *url.URL) *Crawler {
-	return &Crawler{
-		client:        opts.HTTPClient,
-		URL:           opts.URL,
-		ParsedRootURL: root,
-		MaxDepth:      opts.Depth,
-		PagesQueue:    []PageData{{URL: opts.URL, Depth: 0}},
-		uniqueActivePageLinks: map[string]struct{}{
-			normalizeAbsURL(root).String(): {},
-		},
+type Crawler struct {
+	rootURL               string
+	parsedRootURL         *url.URL
+	pagesQueue            []PageData
+	uniqueActivePageLinks map[string]struct{}
+	maxDepth              int
+	rateLimiter           *HTTPRateLimiter
+}
+
+type HTTPRateLimiter struct {
+	client      *http.Client
+	mu          sync.Mutex
+	reqInterval time.Duration
+	nextReqTime time.Time
+}
+
+func newCrawler(rootURL string, depth int, rl *HTTPRateLimiter) (*Crawler, error) {
+	if rl == nil {
+		return nil, ErrorRateLimiterRequired
 	}
+	u, err := url.Parse(rootURL)
+	if err != nil || !isValidWebURL(u) {
+		return nil, ErrorInvalidURL
+	}
+	if depth < 0 {
+		return nil, ErrorInvalidDepth
+	}
+
+	return &Crawler{
+		rootURL:       rootURL,
+		parsedRootURL: u,
+		maxDepth:      depth,
+		pagesQueue:    []PageData{{URL: rootURL, Depth: 0}},
+		uniqueActivePageLinks: map[string]struct{}{
+			normalizeAbsURL(u).String(): {},
+		},
+		rateLimiter: rl,
+	}, nil
+}
+
+func newHTTPRateLimiter(client *http.Client, rps int, delay string) (*HTTPRateLimiter, error) {
+	if client == nil {
+		return nil, ErrorHTTPClientRequired
+	}
+	if rps < 0 {
+		return nil, ErrorInvalidRPS
+	}
+	if delay == "" {
+		delay = "0s"
+	}
+	d, err := time.ParseDuration(delay)
+	if err != nil || d < 0 {
+		return nil, ErrorInvalidDelay
+	}
+	var reqInterval time.Duration
+	if rps != 0 {
+		reqInterval = time.Second / time.Duration(rps)
+	} else {
+		reqInterval = d
+	}
+	return &HTTPRateLimiter{
+		client:      client,
+		mu:          sync.Mutex{},
+		reqInterval: reqInterval,
+		nextReqTime: time.Now(),
+	}, nil
 }
 
 type Report struct {
@@ -101,35 +157,31 @@ type LinkResult struct {
 	Error      string
 }
 
-func (c *Crawler) GetReport(ctx context.Context) Report {
-	pageReports := c.RunPageReportsQueue(ctx)
+func (c *Crawler) getReport(ctx context.Context) Report {
+	pageReports := c.runPageReportsQueue(ctx)
 
 	report := Report{
-		RootURL:     c.URL,
-		Depth:       c.MaxDepth,
+		RootURL:     c.rootURL,
+		Depth:       c.maxDepth,
 		GeneratedAt: time.Now().Truncate(time.Second),
 		Pages:       pageReports,
 	}
 	return report
 }
 
-func (c *Crawler) GetPageReport(ctx context.Context, link string, depth int) PageReport {
+func (c *Crawler) getPageReport(ctx context.Context, link string, depth int) PageReport {
 	report := PageReport{
 		URL:         link,
 		Depth:       depth,
 		BrokenLinks: make([]BrokenLinkReport, 0),
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	resp, err := c.rateLimiter.runThrottledRequest(ctx, ReqParams{
+		url:    link,
+		method: http.MethodGet,
+	})
 	if err != nil {
 		report.Status = "error"
-		report.Error = fmt.Sprintf("error creating request: %v", err)
-		return report
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		report.Status = "error"
-		report.Error = fmt.Sprintf("error sending request: %v", err)
+		report.Error = err.Error()
 		return report
 	}
 	defer func() {
@@ -175,7 +227,7 @@ func (c *Crawler) GetPageReport(ctx context.Context, link string, depth int) Pag
 			return report
 		}
 
-		linkRes := c.CheckExtractedLink(ctx, link, depth)
+		linkRes := c.checkExtractedLink(ctx, link, depth)
 
 		if err := ctx.Err(); err != nil {
 			report.Status = "error"
@@ -194,20 +246,20 @@ func (c *Crawler) GetPageReport(ctx context.Context, link string, depth int) Pag
 	return report
 }
 
-func (c *Crawler) RunPageReportsQueue(ctx context.Context) []PageReport {
+func (c *Crawler) runPageReportsQueue(ctx context.Context) []PageReport {
 	reports := make([]PageReport, 0)
-	for len(c.PagesQueue) > 0 {
+	for len(c.pagesQueue) > 0 {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		current := c.PagesQueue[0]
-		c.PagesQueue = c.PagesQueue[1:]
-		reports = append(reports, c.GetPageReport(ctx, current.URL, current.Depth))
+		current := c.pagesQueue[0]
+		c.pagesQueue = c.pagesQueue[1:]
+		reports = append(reports, c.getPageReport(ctx, current.URL, current.Depth))
 	}
 	return reports
 }
 
-func (c *Crawler) CheckExtractedLink(ctx context.Context, link *url.URL, depth int) LinkResult {
+func (c *Crawler) checkExtractedLink(ctx context.Context, link *url.URL, depth int) LinkResult {
 	if ctx.Err() != nil {
 		return LinkResult{}
 	}
@@ -216,15 +268,10 @@ func (c *Crawler) CheckExtractedLink(ctx context.Context, link *url.URL, depth i
 	}
 	linkStr := link.String()
 	// TODO: use goroutines
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, linkStr, nil)
-	if err != nil {
-		return LinkResult{
-			URL:   linkStr,
-			Kind:  "broken",
-			Error: err.Error(),
-		}
-	}
-	resp, err := c.client.Do(req)
+	resp, err := c.rateLimiter.runThrottledRequest(ctx, ReqParams{
+		url:    linkStr,
+		method: http.MethodHead,
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return LinkResult{}
@@ -248,18 +295,63 @@ func (c *Crawler) CheckExtractedLink(ctx context.Context, link *url.URL, depth i
 		}
 	}
 
-	if isHTMLPage(resp) && link.Hostname() == c.ParsedRootURL.Hostname() && depth < c.MaxDepth && c.uniqueActivePageLinks != nil {
+	if isHTMLPage(resp) && link.Hostname() == c.parsedRootURL.Hostname() && depth < c.maxDepth && c.uniqueActivePageLinks != nil {
 		dedupLink := normalizeAbsURL(link).String()
 		if _, ok := c.uniqueActivePageLinks[dedupLink]; ok {
 			return LinkResult{}
 		}
-		c.PagesQueue = append(
-			c.PagesQueue,
+		c.pagesQueue = append(
+			c.pagesQueue,
 			PageData{URL: linkStr, Depth: depth + 1},
 		)
 		c.uniqueActivePageLinks[dedupLink] = struct{}{}
 	}
 	return LinkResult{}
+}
+
+func (r *HTTPRateLimiter) runThrottledRequest(ctx context.Context, params ReqParams) (*http.Response, error) {
+	if r.reqInterval == 0 {
+		return r.makeHTTPRequest(ctx, params)
+	}
+	left := r.reserveSlot()
+	if left <= 0 {
+		return r.makeHTTPRequest(ctx, params)
+	}
+	timer := time.NewTimer(left)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return r.makeHTTPRequest(ctx, params)
+	}
+}
+
+func (r *HTTPRateLimiter) reserveSlot() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	left := time.Until(r.nextReqTime)
+	if left <= 0 {
+		r.nextReqTime = time.Now().Add(r.reqInterval)
+	} else {
+		r.nextReqTime = r.nextReqTime.Add(r.reqInterval)
+	}
+	return left
+}
+
+func (r *HTTPRateLimiter) makeHTTPRequest(ctx context.Context, params ReqParams) (*http.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, params.method, params.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func isValidWebURL(u *url.URL) bool {

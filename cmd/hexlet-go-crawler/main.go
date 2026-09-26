@@ -36,38 +36,40 @@ func run() error {
 					return nil
 				},
 			},
-			&cli.Int64Flag{
-				Name:  "retries",
-				Value: 1,
-				Usage: "number of retries for failed requests",
-			},
 			&cli.StringFlag{
 				Name:  "delay",
 				Value: "0s",
 				Usage: "delay between requests (example: 200ms, 1s)",
+			},
+			&cli.IntFlag{
+				Name:  "rps",
+				Value: 0,
+				Usage: "limit requests per second (overrides delay)",
+				Action: func(ctx context.Context, cmd *cli.Command, v int) error {
+					if v < 0 {
+						return fmt.Errorf("rps value cannot be negative, received: %v", v)
+					}
+					return nil
+				},
 			},
 			&cli.StringFlag{
 				Name:  "timeout",
 				Value: "15s",
 				Usage: "per-request timeout (example: 200ms, 1s)",
 			},
-			&cli.Int64Flag{
-				Name:  "rps",
-				Value: 0,
-				Usage: "limit requests per second (overrides delay)",
-			},
-			&cli.StringFlag{
-				Name:  "user-agent",
-				Usage: "custom user agent",
-			},
-			&cli.Int64Flag{
+			&cli.IntFlag{
 				Name:  "workers",
 				Value: 4,
 				Usage: "number of concurrent workers",
 			},
+			&cli.IntFlag{
+				Name:  "retries",
+				Value: 1,
+				Usage: "number of retries for failed requests",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 
 			URL := cmd.Args().Get(0)
@@ -115,16 +117,14 @@ func run() error {
 			}
 
 			opts := crawler.Options{
-				URL:     URL,
-				Depth:   cmd.Int("depth"),
-				Retries: cmd.Int64("retries"),
-				Delay:   cmd.String("delay"),
-				Timeout: timeout,
-				// UserAgent   *string
-				Concurrency: cmd.Int64("workers"),
-				// TODO: check future flags spec
-				IndentJSON: " ",
-				HTTPClient: httpClient,
+				URL:         URL,
+				Depth:       cmd.Int("depth"),
+				RPS:         cmd.Int("rps"),
+				Delay:       cmd.String("delay"),
+				Timeout:     timeout,
+				Concurrency: cmd.Int("workers"),
+				IndentJSON:  " ",
+				HTTPClient:  httpClient,
 			}
 			bytes, err := crawler.Analyze(ctx, opts)
 			if err != nil {
