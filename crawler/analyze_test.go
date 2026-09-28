@@ -102,6 +102,15 @@ func analyzePage(
 		HTTPClient: client,
 	})
 	require.NoError(t, err)
+	return validateReport(t, rootURL, payload)
+}
+
+func validateReport(
+	t *testing.T,
+	rootURL string,
+	payload []byte,
+) PageReport {
+	t.Helper()
 
 	var report Report
 	require.NoError(t, json.Unmarshal(payload, &report))
@@ -128,7 +137,6 @@ func analyzePage(
 		require.Contains(t, item, "status_code")
 		require.Contains(t, item, "error")
 	}
-
 	return report.Pages[0]
 }
 
@@ -363,11 +371,14 @@ func TestAnalyze(t *testing.T) {
 				}
 			}),
 		}
+		payload, err := Analyze(ctx, Options{
+			URL:        root,
+			HTTPClient: client,
+		})
+		require.True(t, errors.Is(err, context.Canceled))
 
-		page := analyzePage(t, ctx, root, client)
+		page := validateReport(t, root, payload)
 
-		assert.Equal(t, "error", page.Status)
-		assert.Contains(t, page.Error, context.Canceled.Error())
 		assert.Empty(t, page.BrokenLinks)
 		assert.Equal(t, []string{root, root + "first"}, requested)
 	})

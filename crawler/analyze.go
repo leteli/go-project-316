@@ -1,12 +1,14 @@
 package crawler
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,15 +17,15 @@ import (
 )
 
 type Options struct {
-	URL         string
-	Depth       int
-	Retries     int
-	Delay       string
-	Timeout     string
-	RPS         int
-	Concurrency int
-	IndentJSON  string
-	HTTPClient  *http.Client
+	URL        string
+	Depth      int
+	Retries    int
+	Delay      string
+	Timeout    string
+	RPS        int
+	Workers    int
+	IndentJSON string
+	HTTPClient *http.Client
 }
 
 var (
@@ -34,6 +36,7 @@ var (
 	ErrorHTTPClientRequired  = errors.New("http client is required")
 	ErrorNotHTML             = errors.New("not an HTML page")
 	ErrorRateLimiterRequired = errors.New("http rate limiter is required")
+	ErrorInvalidWorkersCount = errors.New("invalid number of workers")
 )
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
@@ -41,12 +44,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	crawler, err := newCrawler(opts.URL, opts.Depth, httpRateLimiter)
+	crawler, err := newCrawler(opts.URL, opts.Depth, opts.Workers, httpRateLimiter)
 	if err != nil {
 		return nil, err
 	}
-	report := crawler.getReport(ctx)
-	return toFormattedJSON(report)
+	report := crawler.buildReport(ctx)
+
+	raw, err := toFormattedJSON(report)
+	if err != nil {
+		return nil, err
+	}
+	return raw, ctx.Err()
 }
 
 type PageData struct {
@@ -54,18 +62,13 @@ type PageData struct {
 	Depth int
 }
 
-type ReqParams struct {
-	url    string
-	method string
-}
-
 type Crawler struct {
 	rootURL               string
 	parsedRootURL         *url.URL
-	pagesQueue            []PageData
 	uniqueActivePageLinks map[string]struct{}
 	maxDepth              int
 	rateLimiter           *HTTPRateLimiter
+	workers               int
 }
 
 type HTTPRateLimiter struct {
@@ -75,7 +78,7 @@ type HTTPRateLimiter struct {
 	nextReqTime time.Time
 }
 
-func newCrawler(rootURL string, depth int, rl *HTTPRateLimiter) (*Crawler, error) {
+func newCrawler(rootURL string, depth, workers int, rl *HTTPRateLimiter) (*Crawler, error) {
 	if rl == nil {
 		return nil, ErrorRateLimiterRequired
 	}
@@ -86,16 +89,22 @@ func newCrawler(rootURL string, depth int, rl *HTTPRateLimiter) (*Crawler, error
 	if depth < 0 {
 		return nil, ErrorInvalidDepth
 	}
+	if workers < 0 {
+		return nil, ErrorInvalidWorkersCount
+	}
+	if workers == 0 {
+		workers = 1
+	}
 
 	return &Crawler{
 		rootURL:       rootURL,
 		parsedRootURL: u,
 		maxDepth:      depth,
-		pagesQueue:    []PageData{{URL: rootURL, Depth: 0}},
 		uniqueActivePageLinks: map[string]struct{}{
 			normalizeAbsURL(u).String(): {},
 		},
 		rateLimiter: rl,
+		workers:     workers,
 	}, nil
 }
 
@@ -150,63 +159,235 @@ type BrokenLinkReport struct {
 	Error      string `json:"error"`
 }
 
-type LinkResult struct {
-	URL        string
-	Kind       string
-	StatusCode int
-	Error      string
+type ReqParams struct {
+	url    string
+	method string
 }
 
-func (c *Crawler) getReport(ctx context.Context) Report {
-	pageReports := c.runPageReportsQueue(ctx)
+type LinkParams struct {
+	url               string
+	dedupURL          string
+	checkInternalPage bool
+	isRoot            bool
+	depth             int
+	parentIndex       int
+}
 
+type LinkResult struct {
+	URL           string
+	DedupURL      string
+	Kind          string
+	StatusCode    int
+	Status        string
+	Error         string
+	Depth         int
+	parentIndex   int
+	childrenLinks []LinkParams
+	SEO           SEO
+}
+
+var (
+	KindBroken       = "broken"
+	KindInternalPage = "internal_page"
+)
+
+func (c *Crawler) buildReport(ctx context.Context) Report {
 	report := Report{
 		RootURL:     c.rootURL,
 		Depth:       c.maxDepth,
 		GeneratedAt: time.Now().Truncate(time.Second),
-		Pages:       pageReports,
+		Pages:       make([]PageReport, 0),
+	}
+	var currentLevel int
+	tasks := []LinkParams{
+		{
+			url:      c.rootURL,
+			dedupURL: normalizeAbsURL(c.parsedRootURL).String(), checkInternalPage: true,
+			depth:  currentLevel,
+			isRoot: true,
+		},
+	}
+	for currentLevel <= c.maxDepth {
+		tasks = c.levelHandler(ctx, &report, currentLevel, tasks)
+		if len(tasks) == 0 {
+			break
+		}
+		currentLevel++
+	}
+
+	if ctx.Err() != nil {
+		return report
+	}
+	if len(tasks) == 0 {
+		return report
+	}
+	for i := range tasks {
+		tasks[i].checkInternalPage = false
+	}
+	c.levelHandler(ctx, &report, currentLevel, tasks)
+	slices.SortFunc(report.Pages, func(a, b PageReport) int {
+		if a.Depth != b.Depth {
+			return cmp.Compare(a.Depth, b.Depth)
+		}
+		return cmp.Compare(a.URL, b.URL)
+	})
+	for i := range report.Pages {
+		slices.SortFunc(report.Pages[i].BrokenLinks, func(a, b BrokenLinkReport) int {
+			return cmp.Compare(a.URL, b.URL)
+		})
 	}
 	return report
 }
 
-func (c *Crawler) getPageReport(ctx context.Context, link string, depth int) PageReport {
-	report := PageReport{
-		URL:         link,
-		Depth:       depth,
-		BrokenLinks: make([]BrokenLinkReport, 0),
+func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, tasks []LinkParams) []LinkParams {
+
+	in := make(chan LinkParams, len(tasks))
+	out := make(chan LinkResult, len(tasks))
+	var wg sync.WaitGroup
+
+	var nextLevelTasks = make([]LinkParams, 0)
+	var dedupNextLevelPages = make(map[string]struct{})
+
+	wg.Add(c.workers)
+	for range c.workers {
+		go func() {
+			defer wg.Done()
+			for lp := range in {
+				result := c.analyzeLink(ctx, lp)
+				select {
+				case <-ctx.Done():
+					return
+				case out <- result:
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+
+	for _, task := range tasks {
+		in <- task
+	}
+	close(in)
+
+	for res := range out {
+		if ctx.Err() != nil {
+			return nextLevelTasks
+		}
+		if res.Kind == KindBroken {
+			valueExists := len(report.Pages) >= res.parentIndex+1 && report.Pages[res.parentIndex].BrokenLinks != nil
+			if !valueExists {
+				continue
+			}
+			report.Pages[res.parentIndex].BrokenLinks = append(report.Pages[res.parentIndex].BrokenLinks, BrokenLinkReport{
+				URL:        res.URL,
+				StatusCode: res.StatusCode,
+				Error:      res.Error,
+			})
+			continue
+		}
+		if res.Kind == KindInternalPage {
+			pageReport := PageReport{
+				URL:         res.URL,
+				Depth:       res.Depth,
+				HTTPStatus:  res.StatusCode,
+				Status:      res.Status,
+				Error:       res.Error,
+				BrokenLinks: make([]BrokenLinkReport, 0),
+				SEO:         res.SEO,
+			}
+			report.Pages = append(report.Pages, pageReport)
+			c.uniqueActivePageLinks[res.DedupURL] = struct{}{}
+			chL := len(res.childrenLinks)
+			if chL == 0 {
+				continue
+			}
+			for _, ch := range res.childrenLinks {
+				if _, ok := c.uniqueActivePageLinks[ch.dedupURL]; ok {
+					continue
+				}
+
+				ch.parentIndex = len(report.Pages) - 1
+				if ch.checkInternalPage {
+					if _, ok := dedupNextLevelPages[ch.dedupURL]; ok {
+						continue
+					}
+					dedupNextLevelPages[ch.dedupURL] = struct{}{}
+					ch.depth = level + 1
+				} else {
+					ch.depth = level
+				}
+				nextLevelTasks = append(nextLevelTasks, ch)
+			}
+		}
+	}
+	return nextLevelTasks
+}
+
+func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult {
+	linkResult := LinkResult{
+		URL:         params.url,
+		DedupURL:    params.dedupURL,
+		Depth:       params.depth,
+		parentIndex: params.parentIndex,
+	}
+	method := http.MethodHead
+	if params.checkInternalPage {
+		method = http.MethodGet
 	}
 	resp, err := c.rateLimiter.runThrottledRequest(ctx, ReqParams{
-		url:    link,
-		method: http.MethodGet,
+		url:    params.url,
+		method: method,
 	})
 	if err != nil {
-		report.Status = "error"
-		report.Error = err.Error()
-		return report
+		linkResult.Status = "error"
+		linkResult.Error = err.Error()
+		switch {
+		case ctx.Err() != nil:
+		case params.isRoot:
+			linkResult.Kind = KindInternalPage
+		default:
+			linkResult.Kind = KindBroken
+		}
+		return linkResult
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-
-	report.HTTPStatus = resp.StatusCode
-
+	if params.isRoot || (params.checkInternalPage && isHTMLPage(resp)) {
+		linkResult.Kind = KindInternalPage
+	}
+	linkResult.StatusCode = resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		report.Status = "error"
-		report.Error = resp.Status
-		return report
+		if !params.isRoot {
+			linkResult.Kind = KindBroken
+		}
+		linkResult.Status = "error"
+		linkResult.Error = resp.Status
+		return linkResult
+	}
+	if !params.checkInternalPage {
+		return linkResult
 	}
 	if !isHTMLPage(resp) {
-		report.Status = "error"
-		report.Error = ErrorNotHTML.Error()
-		return report
+		if params.isRoot {
+			linkResult.Status = "error"
+			linkResult.Error = ErrorNotHTML.Error()
+			return linkResult
+		}
+		linkResult.Kind = ""
+		return linkResult
 	}
 	doc, err := html.Parse(resp.Body)
 	if err != nil {
-		report.Status = "error"
-		report.Error = fmt.Sprintf("parse error: %v", err)
-		return report
+		linkResult.Status = "error"
+		linkResult.Error = fmt.Sprintf("parse error: %v", err)
+		return linkResult
 	}
-	report.SEO = AnalyzeSEO(doc)
+	linkResult.SEO = AnalyzeSEO(doc)
 
 	resolvedURL := resp.Request.URL
 	links, err := ExtractHTTPLinksFromHTML(
@@ -214,99 +395,20 @@ func (c *Crawler) getPageReport(ctx context.Context, link string, depth int) Pag
 		resolvedURL.String(),
 	)
 	if err != nil {
-		report.Status = "error"
-		report.Error = fmt.Sprintf("parse error: %v", err)
-		return report
+		linkResult.Status = "error"
+		linkResult.Error = fmt.Sprintf("parse error: %v", err)
+		return linkResult
 	}
-	report.Status = "ok"
-
-	for _, link := range links {
-		if err := ctx.Err(); err != nil {
-			report.Status = "error"
-			report.Error = err.Error()
-			return report
-		}
-
-		linkRes := c.checkExtractedLink(ctx, link, depth)
-
-		if err := ctx.Err(); err != nil {
-			report.Status = "error"
-			report.Error = err.Error()
-			return report
-		}
-
-		if linkRes.Kind == "broken" {
-			report.BrokenLinks = append(report.BrokenLinks, BrokenLinkReport{
-				URL:        linkRes.URL,
-				StatusCode: linkRes.StatusCode,
-				Error:      linkRes.Error,
-			})
+	linkResult.Status = "ok"
+	linkResult.childrenLinks = make([]LinkParams, len(links))
+	for i, l := range links {
+		linkResult.childrenLinks[i] = LinkParams{
+			url:               l.String(),
+			dedupURL:          normalizeAbsURL(l).String(),
+			checkInternalPage: l.Hostname() == c.parsedRootURL.Hostname(),
 		}
 	}
-	return report
-}
-
-func (c *Crawler) runPageReportsQueue(ctx context.Context) []PageReport {
-	reports := make([]PageReport, 0)
-	for len(c.pagesQueue) > 0 {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		current := c.pagesQueue[0]
-		c.pagesQueue = c.pagesQueue[1:]
-		reports = append(reports, c.getPageReport(ctx, current.URL, current.Depth))
-	}
-	return reports
-}
-
-func (c *Crawler) checkExtractedLink(ctx context.Context, link *url.URL, depth int) LinkResult {
-	if ctx.Err() != nil {
-		return LinkResult{}
-	}
-	if !isValidWebURL(link) {
-		return LinkResult{}
-	}
-	linkStr := link.String()
-	// TODO: use goroutines
-	resp, err := c.rateLimiter.runThrottledRequest(ctx, ReqParams{
-		url:    linkStr,
-		method: http.MethodHead,
-	})
-	if err != nil {
-		if ctx.Err() != nil {
-			return LinkResult{}
-		}
-		return LinkResult{
-			URL:   linkStr,
-			Kind:  "broken",
-			Error: err.Error(),
-		}
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode >= 400 && resp.StatusCode < 600 {
-		return LinkResult{
-			URL:        linkStr,
-			Kind:       "broken",
-			StatusCode: resp.StatusCode,
-			Error:      resp.Status,
-		}
-	}
-
-	if isHTMLPage(resp) && link.Hostname() == c.parsedRootURL.Hostname() && depth < c.maxDepth && c.uniqueActivePageLinks != nil {
-		dedupLink := normalizeAbsURL(link).String()
-		if _, ok := c.uniqueActivePageLinks[dedupLink]; ok {
-			return LinkResult{}
-		}
-		c.pagesQueue = append(
-			c.pagesQueue,
-			PageData{URL: linkStr, Depth: depth + 1},
-		)
-		c.uniqueActivePageLinks[dedupLink] = struct{}{}
-	}
-	return LinkResult{}
+	return linkResult
 }
 
 func (r *HTTPRateLimiter) runThrottledRequest(ctx context.Context, params ReqParams) (*http.Response, error) {

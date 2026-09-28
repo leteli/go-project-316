@@ -82,12 +82,13 @@ func newSite(t *testing.T, links int) (*httptest.Server, *recorder) {
 	return srv, rec
 }
 
-func expectedRequests(links int) int { return 1 + 2*links }
+func expectedRequests(links int) int { return 1 + links }
 
 func baseOpts(url string) Options {
 	return Options{
 		URL:        url,
 		Depth:      1,
+		Workers:    2,
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	}
 }

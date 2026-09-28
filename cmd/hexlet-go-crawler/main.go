@@ -61,6 +61,12 @@ func run() error {
 				Name:  "workers",
 				Value: 4,
 				Usage: "number of concurrent workers",
+				Action: func(ctx context.Context, cmd *cli.Command, v int) error {
+					if v < 0 {
+						return fmt.Errorf("workers count must be positive, received: %v", v)
+					}
+					return nil
+				},
 			},
 			&cli.IntFlag{
 				Name:  "retries",
@@ -117,20 +123,22 @@ func run() error {
 			}
 
 			opts := crawler.Options{
-				URL:         URL,
-				Depth:       cmd.Int("depth"),
-				RPS:         cmd.Int("rps"),
-				Delay:       cmd.String("delay"),
-				Timeout:     timeout,
-				Concurrency: cmd.Int("workers"),
-				IndentJSON:  " ",
-				HTTPClient:  httpClient,
+				URL:        URL,
+				Depth:      cmd.Int("depth"),
+				RPS:        cmd.Int("rps"),
+				Delay:      cmd.String("delay"),
+				Timeout:    timeout,
+				Workers:    cmd.Int("workers"),
+				IndentJSON: " ",
+				HTTPClient: httpClient,
 			}
 			bytes, err := crawler.Analyze(ctx, opts)
+			if bytes != nil {
+				_, _ = os.Stdout.Write(bytes)
+			}
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(bytes))
 			return nil
 		},
 	}
