@@ -72,6 +72,12 @@ func run() error {
 				Name:  "retries",
 				Value: 1,
 				Usage: "number of retries for failed requests",
+				Action: func(ctx context.Context, cmd *cli.Command, v int) error {
+					if v < 0 {
+						return fmt.Errorf("retries count cannot be negative, received: %v", v)
+					}
+					return nil
+				},
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -127,7 +133,7 @@ func run() error {
 				Depth:      cmd.Int("depth"),
 				RPS:        cmd.Int("rps"),
 				Delay:      cmd.String("delay"),
-				Timeout:    timeout,
+				Retries:    cmd.Int("retries"),
 				Workers:    cmd.Int("workers"),
 				IndentJSON: " ",
 				HTTPClient: httpClient,

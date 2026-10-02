@@ -242,7 +242,7 @@ func TestLimiterReservesDistinctSlots(t *testing.T) {
 	const callers = 8
 	const interval = 20 * time.Millisecond
 
-	limiter, err := newHTTPRateLimiter(&http.Client{}, 0, interval.String())
+	limiter, err := newHTTPRateLimiter(&http.Client{}, 0, interval.String(), 1)
 	require.NoError(t, err)
 
 	waits := make([]time.Duration, callers)

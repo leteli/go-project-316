@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -21,7 +24,6 @@ type Options struct {
 	Depth      int
 	Retries    int
 	Delay      string
-	Timeout    string
 	RPS        int
 	Workers    int
 	IndentJSON string
@@ -32,6 +34,7 @@ var (
 	ErrorInvalidURL          = errors.New("invalid url")
 	ErrorInvalidDepth        = errors.New("invalid depth value")
 	ErrorInvalidDelay        = errors.New("invalid delay value")
+	ErrorInvalidRetriesCout  = errors.New("invalid retries  count")
 	ErrorInvalidRPS          = errors.New("invalid rps value")
 	ErrorHTTPClientRequired  = errors.New("http client is required")
 	ErrorNotHTML             = errors.New("not an HTML page")
@@ -40,7 +43,7 @@ var (
 )
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
-	httpRateLimiter, err := newHTTPRateLimiter(opts.HTTPClient, opts.RPS, opts.Delay)
+	httpRateLimiter, err := newHTTPRateLimiter(opts.HTTPClient, opts.RPS, opts.Delay, opts.Retries)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +79,7 @@ type HTTPRateLimiter struct {
 	mu          sync.Mutex
 	reqInterval time.Duration
 	nextReqTime time.Time
+	retries     int
 }
 
 func newCrawler(rootURL string, depth, workers int, rl *HTTPRateLimiter) (*Crawler, error) {
@@ -108,7 +112,7 @@ func newCrawler(rootURL string, depth, workers int, rl *HTTPRateLimiter) (*Crawl
 	}, nil
 }
 
-func newHTTPRateLimiter(client *http.Client, rps int, delay string) (*HTTPRateLimiter, error) {
+func newHTTPRateLimiter(client *http.Client, rps int, delay string, retries int) (*HTTPRateLimiter, error) {
 	if client == nil {
 		return nil, ErrorHTTPClientRequired
 	}
@@ -122,6 +126,9 @@ func newHTTPRateLimiter(client *http.Client, rps int, delay string) (*HTTPRateLi
 	if err != nil || d < 0 {
 		return nil, ErrorInvalidDelay
 	}
+	if retries < 0 {
+		return nil, ErrorInvalidRetriesCout
+	}
 	var reqInterval time.Duration
 	if rps != 0 {
 		reqInterval = time.Second / time.Duration(rps)
@@ -133,6 +140,7 @@ func newHTTPRateLimiter(client *http.Client, rps int, delay string) (*HTTPRateLi
 		mu:          sync.Mutex{},
 		reqInterval: reqInterval,
 		nextReqTime: time.Now(),
+		retries:     retries,
 	}, nil
 }
 
@@ -338,7 +346,7 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 	if params.checkInternalPage {
 		method = http.MethodGet
 	}
-	resp, err := c.rateLimiter.runThrottledRequest(ctx, ReqParams{
+	resp, err := c.rateLimiter.runThrottledRequestWithRetries(ctx, ReqParams{
 		url:    params.url,
 		method: method,
 	})
@@ -355,6 +363,7 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		return linkResult
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 	}()
 	if params.isRoot || (params.checkInternalPage && isHTMLPage(resp)) {
@@ -409,6 +418,40 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		}
 	}
 	return linkResult
+}
+
+func (r *HTTPRateLimiter) runThrottledRequestWithRetries(ctx context.Context, params ReqParams) (*http.Response, error) {
+	var attempt int
+	for attempt < r.retries {
+		res, err := r.runThrottledRequest(ctx, params)
+		attempt++
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, err
+			}
+			var netErr net.Error
+			timeoutErr := errors.As(err, &netErr) && netErr.Timeout()
+			if !timeoutErr {
+				return res, err
+			}
+		}
+		if res != nil {
+			if !isRetryableStatus(res.StatusCode) {
+				return res, err
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+			_ = res.Body.Close()
+		}
+		timer := time.NewTimer(jitter(backoff(attempt)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+			continue
+		}
+	}
+	return r.runThrottledRequest(ctx, params)
 }
 
 func (r *HTTPRateLimiter) runThrottledRequest(ctx context.Context, params ReqParams) (*http.Response, error) {
@@ -477,4 +520,28 @@ func toFormattedJSON(v Report) ([]byte, error) {
 		return nil, err
 	}
 	return payload, nil
+}
+
+func isRetryableStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+const BaseDelay = time.Duration(100 * time.Millisecond)
+const MaxDelay = time.Duration(5 * time.Second)
+
+func backoff(attempt int) time.Duration {
+	d := time.Duration(1<<attempt) * BaseDelay
+	if d <= 0 || d > MaxDelay {
+		return MaxDelay
+	}
+	return d
+}
+
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(rand.Int63n(int64(d)))
 }

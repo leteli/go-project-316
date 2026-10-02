@@ -2,37 +2,32 @@
 
 [![hexlet-check](https://github.com/leteli/go-project-316/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/leteli/go-project-316/actions)
 
-Разработайте утилиту для обхода и анализа сайтов
+## Usage
 
-Учебный проект Хекслета: https://ru.hexlet.io/programs/go
-
-
-## Стек
-
-- Go
-
-## Установка
-
-<!-- Опишите установку: клонирование, зависимости, переменные окружения -->
-
-```bash
-git clone https://github.com/leteli/go-project-316.git
-cd go-project-316
+```
+hexlet-go-crawler [flags] <url>
 ```
 
-## Использование
+The JSON report is written to stdout.
 
-<!-- Добавьте примеры запуска и запись asciinema — именно это смотрит работодатель -->
+## Flags
 
----
+- `--depth` (default `10`): maximum crawl depth; `0` means the start page only.
+- `--delay` (default `0s`): minimum delay between requests, e.g. `200ms`, `1s`.
+- `--rps` (default `0`): maximum requests per second; overrides `--delay` when set.
+- `--timeout` (default `15s`): timeout for a single request, e.g. `200ms`, `1s`.
+- `--workers` (default `4`): number of concurrent workers.
+- `--retries` (default `1`): number of extra attempts for a failed request; `0` disables retries.
 
-<details>
-<summary>Автоматические тесты Хекслета</summary>
+## Retries
 
-Тесты запускаются на каждый коммит. За запуск отвечает файл `.github/workflows/hexlet-check.yml` — не удаляйте и не переименовывайте ни его, ни репозиторий.
+A request is retried, up to `--retries` extra times, if it:
 
-</details>
+- times out;
+- gets one of these HTTP statuses: `408`, `425`, `429`, `500`, `502`, `503`, `504`.
 
-## О Хекслете
+These are not retried: other network errors (connection refused or reset, DNS failures, blocked addresses),
+any other HTTP status, and a canceled or expired crawl.
 
-[Хекслет](https://ru.hexlet.io/) — школа программирования: авторские программы обучения с практикой, поддержкой наставников и реальными проектами, которые остаются в резюме. Этот репозиторий — один из таких проектов.
+Retries use exponential backoff with jitter: each wait is a random time between 0 and a cap that starts at 200ms, doubles with every retry and never exceeds 5s. Retries still respect `--rps` and `--delay`.
+If all attempts fail, the last response or error is reported.
