@@ -1,4 +1,4 @@
-# Парсер сайтов (Go)
+# Web crawler (Go)
 
 [![hexlet-check](https://github.com/leteli/go-project-316/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/leteli/go-project-316/actions)
 
