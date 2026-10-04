@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -202,6 +203,7 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 			if !valueExists {
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "broken link: url=%v", res.url)
 			brokenLinkReport := BrokenLinkReport{
 				URL:        res.url,
 				StatusCode: res.statusCode,
