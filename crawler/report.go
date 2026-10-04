@@ -68,6 +68,9 @@ func sortReportLinks(report Report) Report {
 			return cmp.Compare(a.URL, b.URL)
 		})
 		slices.SortFunc(report.Pages[i].Assets, func(a, b AssetsReport) int {
+			if a.Type != b.Type {
+				return cmp.Compare(a.Type, b.Type)
+			}
 			return cmp.Compare(a.URL, b.URL)
 		})
 	}
