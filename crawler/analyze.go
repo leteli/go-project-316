@@ -26,7 +26,7 @@ type Options struct {
 	Delay      string
 	RPS        int
 	Workers    int
-	IndentJSON string
+	IndentJSON bool
 	HTTPClient *http.Client
 }
 
@@ -52,8 +52,9 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return nil, err
 	}
 	report := crawler.buildReport(ctx)
+	report.GeneratedAt = time.Now().UTC().Truncate(time.Second)
 
-	raw, err := toFormattedJSON(report)
+	raw, err := toFormattedJSON(report, opts.IndentJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -160,14 +161,15 @@ type Report struct {
 }
 
 type PageReport struct {
-	URL         string             `json:"url"`
-	Depth       int                `json:"depth"`
-	HTTPStatus  int                `json:"http_status"`
-	Status      string             `json:"status"`
-	Error       string             `json:"error"`
-	BrokenLinks []BrokenLinkReport `json:"broken_links"`
-	SEO         SEO                `json:"seo"`
-	Assets      []AssetsReport     `json:"assets"`
+	URL          string             `json:"url"`
+	Depth        int                `json:"depth"`
+	HTTPStatus   int                `json:"http_status"`
+	Status       string             `json:"status"`
+	Error        string             `json:"error"`
+	SEO          SEO                `json:"seo"`
+	BrokenLinks  []BrokenLinkReport `json:"broken_links"`
+	Assets       []AssetsReport     `json:"assets"`
+	DiscoveredAt time.Time          `json:"discovered_at"`
 }
 
 type BrokenLinkReport struct {
@@ -222,10 +224,9 @@ var (
 
 func (c *Crawler) buildReport(ctx context.Context) Report {
 	report := Report{
-		RootURL:     c.rootURL,
-		Depth:       c.maxDepth,
-		GeneratedAt: time.Now().Truncate(time.Second),
-		Pages:       make([]PageReport, 0),
+		RootURL: c.rootURL,
+		Depth:   c.maxDepth,
+		Pages:   make([]PageReport, 0),
 	}
 	var currentLevel int
 	tasks := []LinkParams{
@@ -328,14 +329,15 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 
 		case KindInternalPage:
 			pageReport := PageReport{
-				URL:         res.URL,
-				Depth:       res.Depth,
-				HTTPStatus:  res.StatusCode,
-				Status:      res.Status,
-				Error:       res.Error,
-				BrokenLinks: make([]BrokenLinkReport, 0),
-				SEO:         res.SEO,
-				Assets:      make([]AssetsReport, 0),
+				URL:          res.URL,
+				Depth:        res.Depth,
+				HTTPStatus:   res.StatusCode,
+				Status:       res.Status,
+				Error:        res.Error,
+				SEO:          res.SEO,
+				BrokenLinks:  make([]BrokenLinkReport, 0),
+				Assets:       make([]AssetsReport, 0),
+				DiscoveredAt: time.Now().UTC().Truncate(time.Second),
 			}
 			for _, ch := range res.childrenLinks {
 				if _, ok := c.uniqueActivePageLinks[ch.dedupURL]; ok {
@@ -438,7 +440,7 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 			linkResult.AssetType = params.assetType
 		}
 		linkResult.Status = "error"
-		linkResult.Error = resp.Status
+		linkResult.Error = http.StatusText(resp.StatusCode)
 		return linkResult
 	}
 
@@ -593,8 +595,16 @@ func isHTMLPage(res *http.Response) bool {
 	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
 }
 
-func toFormattedJSON(v Report) ([]byte, error) {
-	payload, err := json.MarshalIndent(v, "", "  ")
+func toFormattedJSON(v Report, withIndent bool) ([]byte, error) {
+	var payload []byte
+	var err error
+
+	if withIndent {
+		payload, err = json.MarshalIndent(v, "", "  ")
+	} else {
+		payload, err = json.Marshal(v)
+	}
+	payload = append(payload, '\n')
 	if err != nil {
 		return nil, err
 	}

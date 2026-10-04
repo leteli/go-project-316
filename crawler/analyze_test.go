@@ -221,7 +221,7 @@ func TestAnalyze(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, page.HTTPStatus)
 		assert.Equal(t, "error", page.Status)
-		assert.Contains(t, page.Error, "404 Not Found")
+		assert.Contains(t, page.Error, http.StatusText(http.StatusNotFound))
 		assert.Empty(t, page.BrokenLinks)
 	})
 
@@ -291,7 +291,7 @@ func TestAnalyze(t *testing.T) {
 		assert.Equal(t, BrokenLinkReport{
 			URL:        root + "missing",
 			StatusCode: http.StatusNotFound,
-			Error:      "404 Not Found",
+			Error:      "Not Found",
 		}, page.BrokenLinks[0])
 		assert.Equal(t, 1, calls[root+"ok"])
 		assert.Equal(t, 1, calls[root+"missing"])
@@ -335,10 +335,7 @@ func TestAnalyze(t *testing.T) {
 		} {
 			require.Contains(t, byURL, target)
 			assert.Equal(t, code, byURL[target].StatusCode)
-			assert.Equal(t,
-				fmt.Sprintf("%d %s", code, http.StatusText(code)),
-				byURL[target].Error,
-			)
+			assert.Equal(t, http.StatusText(code), byURL[target].Error)
 		}
 
 		require.Contains(t, byURL, offline)
@@ -585,7 +582,7 @@ func TestAnalyzeAssets(t *testing.T) {
 			URL:        root + "missing.js",
 			StatusCode: http.StatusNotFound,
 			Type:       "script",
-			Error:      "404 Not Found",
+			Error:      "Not Found",
 		}}, page.Assets)
 		assert.Equal(t, 1, calls[root+"missing.js"])
 	})

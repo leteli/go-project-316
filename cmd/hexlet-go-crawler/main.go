@@ -79,6 +79,11 @@ func run() error {
 					return nil
 				},
 			},
+			&cli.BoolFlag{
+				Name:  "IndentJSON",
+				Value: false,
+				Usage: "format json with indents",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -135,7 +140,7 @@ func run() error {
 				Delay:      cmd.String("delay"),
 				Retries:    cmd.Int("retries"),
 				Workers:    cmd.Int("workers"),
-				IndentJSON: " ",
+				IndentJSON: cmd.Bool("IndentJSON"),
 				HTTPClient: httpClient,
 			}
 			bytes, err := crawler.Analyze(ctx, opts)
