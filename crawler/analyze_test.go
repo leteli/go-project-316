@@ -112,10 +112,10 @@ func analyzePagesWithAssets(
 	t.Helper()
 
 	payload, err := Analyze(ctx, Options{
-		URL:        rootURL,
-		HTTPClient: client,
-		Depth:      depth,
-		Workers:    workers,
+		URL:         rootURL,
+		HTTPClient:  client,
+		Depth:       depth,
+		Concurrency: workers,
 	})
 	require.NoError(t, err)
 	var report Report

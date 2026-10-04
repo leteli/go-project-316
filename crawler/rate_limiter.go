@@ -24,18 +24,14 @@ type ReqParams struct {
 	method string
 }
 
-func newHTTPRateLimiter(client *http.Client, rps int, delay string, retries int) (*HTTPRateLimiter, error) {
+func newHTTPRateLimiter(client *http.Client, rps int, delay time.Duration, retries int) (*HTTPRateLimiter, error) {
 	if client == nil {
 		return nil, ErrorHTTPClientRequired
 	}
 	if rps < 0 {
 		return nil, ErrorInvalidRPS
 	}
-	if delay == "" {
-		delay = "0s"
-	}
-	d, err := time.ParseDuration(delay)
-	if err != nil || d < 0 {
+	if delay < 0 {
 		return nil, ErrorInvalidDelay
 	}
 	if retries < 0 {
@@ -45,7 +41,7 @@ func newHTTPRateLimiter(client *http.Client, rps int, delay string, retries int)
 	if rps != 0 {
 		reqInterval = time.Second / time.Duration(rps)
 	} else {
-		reqInterval = d
+		reqInterval = delay
 	}
 	return &HTTPRateLimiter{
 		client:      client,

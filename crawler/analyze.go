@@ -14,14 +14,15 @@ import (
 )
 
 type Options struct {
-	URL        string
-	Depth      int
-	Retries    int
-	Delay      string
-	RPS        int
-	Workers    int
-	IndentJSON bool
-	HTTPClient *http.Client
+	URL         string
+	Depth       int
+	Retries     int
+	Delay       time.Duration
+	RPS         int
+	Concurrency int
+	Timeout     time.Duration
+	IndentJSON  bool
+	HTTPClient  *http.Client
 }
 
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
@@ -29,7 +30,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	crawler, err := newCrawler(opts.URL, opts.Depth, opts.Workers, httpRateLimiter)
+	crawler, err := newCrawler(opts.URL, opts.Depth, opts.Concurrency, httpRateLimiter)
 	if err != nil {
 		return nil, err
 	}

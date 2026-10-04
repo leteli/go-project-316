@@ -6,6 +6,7 @@ var (
 	ErrorInvalidURL          = errors.New("invalid url")
 	ErrorInvalidDepth        = errors.New("invalid depth value")
 	ErrorInvalidDelay        = errors.New("invalid delay value")
+	ErrorInvalidTimeout      = errors.New("invalid timeout value")
 	ErrorInvalidRetriesCout  = errors.New("invalid retries  count")
 	ErrorInvalidRPS          = errors.New("invalid rps value")
 	ErrorHTTPClientRequired  = errors.New("http client is required")

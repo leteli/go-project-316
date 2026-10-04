@@ -86,10 +86,10 @@ func expectedRequests(links int) int { return 1 + links }
 
 func baseOpts(url string) Options {
 	return Options{
-		URL:        url,
-		Depth:      1,
-		Workers:    2,
-		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+		URL:         url,
+		Depth:       1,
+		Concurrency: 2,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -109,7 +109,7 @@ func TestDelayIsRespectedBetweenRequests(t *testing.T) {
 
 	srv, rec := newSite(t, links)
 	opts := baseOpts(srv.URL)
-	opts.Delay = delay.String()
+	opts.Delay = delay
 
 	mustAnalyze(t, opts)
 
@@ -144,7 +144,7 @@ func TestRPSTakesPrecedenceOverDelay(t *testing.T) {
 
 	srv, rec := newSite(t, links)
 	opts := baseOpts(srv.URL)
-	opts.Delay = "1s"
+	opts.Delay = time.Second
 	opts.RPS = rps
 
 	start := time.Now()
@@ -185,7 +185,7 @@ func TestReportIsIdenticalWithAndWithoutRateLimit(t *testing.T) {
 
 	srvSlow, _ := newSite(t, links)
 	slowOpts := baseOpts(srvSlow.URL)
-	slowOpts.Delay = "20ms"
+	slowOpts.Delay = 20 * time.Millisecond
 	slow := mustAnalyze(t, slowOpts)
 
 	require.Len(t, slow.Pages, len(fast.Pages), "rate limiting must not change the page count")
@@ -199,7 +199,7 @@ func TestReportIsIdenticalWithAndWithoutRateLimit(t *testing.T) {
 func TestCancelStopsRateLimitWait(t *testing.T) {
 	srv, _ := newSite(t, 5)
 	opts := baseOpts(srv.URL)
-	opts.Delay = "10s"
+	opts.Delay = 10 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -222,9 +222,8 @@ func TestInvalidRateOptions(t *testing.T) {
 	srv, _ := newSite(t, 1)
 
 	cases := map[string]func(*Options){
-		"unparsable delay": func(o *Options) { o.Delay = "200" },
-		"negative delay":   func(o *Options) { o.Delay = "-1s" },
-		"negative rps":     func(o *Options) { o.RPS = -5 },
+		"negative delay": func(o *Options) { o.Delay = -time.Second },
+		"negative rps":   func(o *Options) { o.RPS = -5 },
 	}
 
 	for name, mutate := range cases {
@@ -242,7 +241,7 @@ func TestLimiterReservesDistinctSlots(t *testing.T) {
 	const callers = 8
 	const interval = 20 * time.Millisecond
 
-	limiter, err := newHTTPRateLimiter(&http.Client{}, 0, interval.String(), 1)
+	limiter, err := newHTTPRateLimiter(&http.Client{}, 0, interval, 1)
 	require.NoError(t, err)
 
 	waits := make([]time.Duration, callers)

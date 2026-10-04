@@ -93,13 +93,13 @@ func run() error {
 			if URL == "" {
 				return errors.New("URL argument is required")
 			}
-			timeout := cmd.String("timeout")
-			d, err := time.ParseDuration(timeout)
-			if err != nil {
-				d = 15 * time.Second
+			timeout, err := time.ParseDuration(cmd.String("timeout"))
+			if err != nil || timeout < 0 {
+				return crawler.ErrorInvalidTimeout
 			}
+
 			httpClient := &http.Client{
-				Timeout: d,
+				Timeout: timeout,
 				Transport: &http.Transport{
 					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 						host, port, err := net.SplitHostPort(addr)
@@ -133,15 +133,21 @@ func run() error {
 				},
 			}
 
+			delay, err := time.ParseDuration(cmd.String("delay"))
+			if err != nil || delay < 0 {
+				return crawler.ErrorInvalidDelay
+			}
+
 			opts := crawler.Options{
-				URL:        URL,
-				Depth:      cmd.Int("depth"),
-				RPS:        cmd.Int("rps"),
-				Delay:      cmd.String("delay"),
-				Retries:    cmd.Int("retries"),
-				Workers:    cmd.Int("workers"),
-				IndentJSON: cmd.Bool("IndentJSON"),
-				HTTPClient: httpClient,
+				URL:         URL,
+				Depth:       cmd.Int("depth"),
+				RPS:         cmd.Int("rps"),
+				Delay:       delay,
+				Retries:     cmd.Int("retries"),
+				Concurrency: cmd.Int("workers"),
+				Timeout:     timeout,
+				IndentJSON:  cmd.Bool("IndentJSON"),
+				HTTPClient:  httpClient,
 			}
 			bytes, err := crawler.Analyze(ctx, opts)
 			if bytes != nil {

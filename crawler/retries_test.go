@@ -63,7 +63,7 @@ func newTestLimiter(t *testing.T, client *http.Client, retries int) *HTTPRateLim
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	l, err := newHTTPRateLimiter(client, 0, "0s", retries)
+	l, err := newHTTPRateLimiter(client, 0, 0, retries)
 	require.NoError(t, err, "limiter must be created")
 	return l
 }

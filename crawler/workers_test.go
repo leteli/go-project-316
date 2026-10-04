@@ -113,7 +113,7 @@ func TestLevelIsProcessedByWholeWorkerPool(t *testing.T) {
 
 	srv, rec := newGraphSite(t, pages)
 	opts := baseOpts(srv.URL)
-	opts.Workers = workers
+	opts.Concurrency = workers
 
 	start := time.Now()
 	rep := mustAnalyze(t, opts)
@@ -139,7 +139,7 @@ func TestCancelDoesNotLeakWorkers(t *testing.T) {
 
 	srv, _ := newGraphSite(t, pages)
 	opts := baseOpts(srv.URL)
-	opts.Workers = 4
+	opts.Concurrency = 4
 
 	runtime.GC()
 	before := runtime.NumGoroutine()
