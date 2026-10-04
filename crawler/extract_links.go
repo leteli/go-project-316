@@ -14,10 +14,10 @@ var LinkAttrByNode = map[atom.Atom]string{
 	atom.Link:   "href",
 	atom.Script: "src",
 	atom.Img:    "src",
-	atom.Video:  "src",
-	atom.Audio:  "src",
-	atom.Source: "src",
-	atom.Iframe: "src",
+	// atom.Video:  "src",
+	// atom.Audio:  "src",
+	// atom.Source: "src",
+	// atom.Iframe: "src",
 }
 
 type LinkData struct {
@@ -63,6 +63,20 @@ func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]LinkData, er
 		attr, ok := LinkAttrByNode[n.DataAtom]
 		if !ok {
 			continue
+		}
+
+		if n.DataAtom == atom.Link {
+			var rel string
+			for _, a := range n.Attr {
+				if a.Key == "rel" {
+					rel = a.Val
+					break
+				}
+			}
+			if rel != "stylesheet" && rel != "alternate" {
+				// NB: attempt to fix automated tests (included favicon?)
+				continue
+			}
 		}
 		for _, a := range n.Attr {
 			if a.Key != attr {

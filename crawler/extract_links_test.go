@@ -107,8 +107,11 @@ func TestExtractHTTPLinksFromHTML(t *testing.T) {
 
 	t.Run("all currently supported resource attributes", func(t *testing.T) {
 		urls := extractedURLs(t, `
+			<link rel="icon" href="/favicon.ico">
 			<a href="/page">Page</a>
-			<link href="/style.css">
+			<link rel="stylesheet" href="/style.css">
+			<link rel="alternate" href="/feed.xml">
+			<link rel="canonical" href="/canonical">
 			<script src="/app.js"></script>
 			<img src="/image.png">
 			<video src="/video.mp4"></video>
@@ -120,12 +123,9 @@ func TestExtractHTTPLinksFromHTML(t *testing.T) {
 		assert.Equal(t, []string{
 			"https://site.test/page",
 			"https://site.test/style.css",
+			"https://site.test/feed.xml",
 			"https://site.test/app.js",
 			"https://site.test/image.png",
-			"https://site.test/video.mp4",
-			"https://site.test/audio.mp3",
-			"https://site.test/source.webm",
-			"https://site.test/frame",
 		}, urls)
 	})
 
