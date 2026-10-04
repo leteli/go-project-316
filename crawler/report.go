@@ -19,7 +19,7 @@ type PageReport struct {
 	Depth        int                `json:"depth"`
 	HTTPStatus   int                `json:"http_status"`
 	Status       string             `json:"status"`
-	Error        string             `json:"error"`
+	Error        string             `json:"error,omitempty"`
 	SEO          SEO                `json:"seo"`
 	BrokenLinks  []BrokenLinkReport `json:"broken_links"`
 	Assets       []AssetsReport     `json:"assets"`
@@ -37,7 +37,7 @@ type AssetsReport struct {
 	Type       string `json:"type"`
 	StatusCode int    `json:"status_code"`
 	SizeBytes  int    `json:"size_bytes"`
-	Error      string `json:"error"`
+	Error      string `json:"error,omitempty"`
 }
 
 func toFormattedJSON(v Report, withIndent bool) ([]byte, error) {

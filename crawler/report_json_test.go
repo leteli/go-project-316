@@ -25,7 +25,6 @@ const goldenReport = `{
       "depth": 0,
       "http_status": 200,
       "status": "ok",
-      "error": "",
       "seo": {
         "has_title": true,
         "title": "Example title",
@@ -45,8 +44,7 @@ const goldenReport = `{
           "url": "http://example.test/static/logo.png",
           "type": "image",
           "status_code": 200,
-          "size_bytes": 12345,
-          "error": ""
+          "size_bytes": 12345
         }
       ],
       "discovered_at": "<time>"

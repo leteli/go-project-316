@@ -131,12 +131,11 @@ func analyzePagesWithAssets(
 		require.Contains(t, p, "broken_links")
 		require.NotEqual(t, "null", string(p["broken_links"]))
 		require.NotEqual(t, "null", string(p["assets"]))
-		require.Contains(t, p, "error")
 
 		var assets []map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(p["assets"], &assets))
 		for _, a := range assets {
-			for _, key := range []string{"url", "type", "status_code", "size_bytes", "error"} {
+			for _, key := range []string{"url", "type", "status_code", "size_bytes"} {
 				require.Contains(t, a, key)
 			}
 		}
@@ -178,9 +177,17 @@ func validateReport(
 	}
 	require.NoError(t, json.Unmarshal(payload, &raw))
 	require.Len(t, raw.Pages, 1)
-	require.Contains(t, raw.Pages[0], "error")
+	if report.Pages[0].Error != "" {
+		require.Contains(t, raw.Pages[0], "error")
+	} else {
+		require.NotContains(t, raw.Pages[0], "error")
+	}
 	require.Contains(t, raw.Pages[0], "broken_links")
-	require.NotEqual(t, "null", string(raw.Pages[0]["broken_links"]))
+	require.Contains(t, raw.Pages[0], "assets")
+	if report.Pages[0].HTTPStatus != 0 {
+		require.NotEqual(t, "null", string(raw.Pages[0]["broken_links"]))
+		require.NotEqual(t, "null", string(raw.Pages[0]["assets"]))
+	}
 
 	var broken []map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(
@@ -235,7 +242,8 @@ func TestAnalyze(t *testing.T) {
 		assert.Zero(t, page.HTTPStatus)
 		assert.Equal(t, "error", page.Status)
 		assert.Contains(t, page.Error, "test network failure")
-		assert.Empty(t, page.BrokenLinks)
+		assert.Nil(t, page.BrokenLinks)
+		assert.Nil(t, page.Assets)
 	})
 
 	t.Run("not HTML", func(t *testing.T) {
@@ -658,5 +666,24 @@ func TestAnalyzeAssets(t *testing.T) {
 
 		assert.Empty(t, findPage(t, pages, root).Assets)
 		assert.Equal(t, 1, findPage(t, pages, root+"en/").Depth)
+	})
+
+	t.Run("internal XML feed is reported as page", func(t *testing.T) {
+		client, _ := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`<link rel="alternate" type="application/rss+xml" href="/feed.xml">`),
+			root + "feed.xml": {
+				status:      http.StatusOK,
+				contentType: "application/rss+xml",
+				body:        `<rss><channel><title>Crawler Blog</title></channel></rss>`,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		feed := findPage(t, pages, root+"feed.xml")
+		assert.Equal(t, 1, feed.Depth)
+		assert.Equal(t, "ok", feed.Status)
+		assert.Equal(t, "Crawler Blog", feed.SEO.Title)
+		assert.Empty(t, feed.Assets)
 	})
 }

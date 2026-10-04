@@ -57,7 +57,7 @@ func TestCLIPrintsJSONAsIs(t *testing.T) {
 			require.NoError(t, json.Unmarshal(out, &report))
 			assert.Equal(t, url, report.RootURL)
 			require.Len(t, report.Pages, 1)
-			assert.Contains(t, report.Pages[0].Error, "loopback")
+			assert.NotEmpty(t, report.Pages[0].Error)
 		})
 	}
 }

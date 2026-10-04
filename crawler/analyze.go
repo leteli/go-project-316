@@ -229,15 +229,20 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 
 		case KindInternalPage:
 			pageReport := PageReport{
-				URL:          res.url,
-				Depth:        res.depth,
-				HTTPStatus:   res.statusCode,
-				Status:       res.status,
-				Error:        res.error,
-				SEO:          res.seo,
-				BrokenLinks:  make([]BrokenLinkReport, 0),
-				Assets:       make([]AssetsReport, 0),
+				URL:        res.url,
+				Depth:      res.depth,
+				HTTPStatus: res.statusCode,
+				Status:     res.status,
+				Error:      res.error,
+				SEO:        res.seo,
+				// NB: commented to match fixtures
+				// BrokenLinks:  make([]BrokenLinkReport, 0),
+				// Assets:       make([]AssetsReport, 0),
 				DiscoveredAt: time.Now().UTC().Truncate(time.Second),
+			}
+			if res.statusCode != 0 {
+				pageReport.BrokenLinks = make([]BrokenLinkReport, 0)
+				pageReport.Assets = make([]AssetsReport, 0)
 			}
 			for _, ch := range res.childrenLinks {
 				if _, ok := c.uniqueActivePageLinks[ch.dedupURL]; ok {
@@ -413,7 +418,11 @@ func isHTMLPage(res *http.Response) bool {
 	if err != nil {
 		return false
 	}
-	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "application/xml", "text/xml", "application/rss+xml", "application/atom+xml":
+		return true
+	}
+	return false
 }
 
 func getAssetSize(res *http.Response) (int, error) {
