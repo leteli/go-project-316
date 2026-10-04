@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,11 +23,12 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type stubReply struct {
-	status      int
-	contentType string
-	body        string
-	err         error
-	location    string
+	status        int
+	contentType   string
+	contentLength int
+	body          string
+	err           error
+	location      string
 }
 
 func htmlReply(body string) stubReply {
@@ -44,6 +47,11 @@ func responseFor(req *http.Request, reply stubReply) *http.Response {
 	if reply.location != "" {
 		header.Set("Location", reply.location)
 	}
+	contentLength := int64(-1)
+	if reply.contentLength > 0 {
+		header.Set("Content-Length", strconv.Itoa(reply.contentLength))
+		contentLength = int64(reply.contentLength)
+	}
 
 	return &http.Response{
 		StatusCode: reply.status,
@@ -52,9 +60,10 @@ func responseFor(req *http.Request, reply stubReply) *http.Response {
 			reply.status,
 			http.StatusText(reply.status),
 		),
-		Header:  header,
-		Body:    io.NopCloser(strings.NewReader(reply.body)),
-		Request: req,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(reply.body)),
+		ContentLength: contentLength,
+		Request:       req,
 	}
 }
 
@@ -65,6 +74,7 @@ func newStubClient(
 	t.Helper()
 
 	calls := make(map[string]int)
+	var mu sync.Mutex
 	client := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if err := req.Context().Err(); err != nil {
@@ -72,7 +82,9 @@ func newStubClient(
 			}
 
 			requestURL := req.URL.String()
+			mu.Lock()
 			calls[requestURL]++
+			mu.Unlock()
 
 			reply, ok := replies[requestURL]
 			if !ok {
@@ -87,6 +99,49 @@ func newStubClient(
 		}),
 	}
 	return client, calls
+}
+
+func analyzePagesWithAssets(
+	t *testing.T,
+	ctx context.Context,
+	rootURL string,
+	client *http.Client,
+	depth int,
+	workers int,
+) []PageReport {
+	t.Helper()
+
+	payload, err := Analyze(ctx, Options{
+		URL:        rootURL,
+		HTTPClient: client,
+		Depth:      depth,
+		Workers:    workers,
+	})
+	require.NoError(t, err)
+	var report Report
+	require.NoError(t, json.Unmarshal(payload, &report))
+	require.Equal(t, rootURL, report.RootURL)
+	require.Equal(t, rootURL, report.Pages[0].URL)
+	var raw struct {
+		Pages []map[string]json.RawMessage `json:"pages"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &raw))
+	for _, p := range raw.Pages {
+		require.Contains(t, p, "assets")
+		require.Contains(t, p, "broken_links")
+		require.NotEqual(t, "null", string(p["broken_links"]))
+		require.NotEqual(t, "null", string(p["assets"]))
+		require.Contains(t, p, "error")
+
+		var assets []map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(p["assets"], &assets))
+		for _, a := range assets {
+			for _, key := range []string{"url", "type", "status_code", "size_bytes", "error"} {
+				require.Contains(t, a, key)
+			}
+		}
+	}
+	return report.Pages
 }
 
 func analyzePage(
@@ -244,12 +299,14 @@ func TestAnalyze(t *testing.T) {
 
 	t.Run("HTTP and network errors including resources", func(t *testing.T) {
 		const offline = "https://network.test/offline"
+		const refused = "https://network.test/refused"
 		client, _ := newStubClient(t, map[string]stubReply{
 			root: htmlReply(`
 				<a href="/ok">OK</a>
 				<a href="/missing">Missing</a>
 				<a href="/failure">Failure</a>
-				<script src="https://network.test/offline"></script>
+				<a href="https://network.test/offline"></a>
+				<script src="https://network.test/refused"></script>
 				<link rel="stylesheet" href="/missing.css">
 				<img src="/image.png">
 			`),
@@ -259,21 +316,22 @@ func TestAnalyze(t *testing.T) {
 			root + "missing.css": {status: http.StatusNotFound},
 			root + "image.png":   {status: http.StatusOK},
 			offline:              {err: errors.New("test DNS failure")},
+			refused:              {err: errors.New("connection refused")},
 		})
 
 		page := analyzePage(t, context.Background(), root, client)
 
-		require.Len(t, page.BrokenLinks, 4)
+		require.Len(t, page.BrokenLinks, 3)
+		require.Len(t, page.Assets, 3)
 		byURL := make(map[string]BrokenLinkReport)
 		for _, link := range page.BrokenLinks {
 			byURL[link.URL] = link
 		}
-		require.Len(t, byURL, 4)
+		require.Len(t, byURL, 3)
 
 		for target, code := range map[string]int{
-			root + "missing":     http.StatusNotFound,
-			root + "failure":     http.StatusServiceUnavailable,
-			root + "missing.css": http.StatusNotFound,
+			root + "missing": http.StatusNotFound,
+			root + "failure": http.StatusServiceUnavailable,
 		} {
 			require.Contains(t, byURL, target)
 			assert.Equal(t, code, byURL[target].StatusCode)
@@ -381,5 +439,227 @@ func TestAnalyze(t *testing.T) {
 
 		assert.Empty(t, page.BrokenLinks)
 		assert.Equal(t, []string{root, root + "first"}, requested)
+	})
+}
+
+func findPage(t *testing.T, pages []PageReport, url string) PageReport {
+	t.Helper()
+
+	for _, p := range pages {
+		if p.URL == url {
+			return p
+		}
+	}
+	require.Failf(t, "page not found", "%s", url)
+	return PageReport{}
+}
+
+func TestAnalyzeAssets(t *testing.T) {
+	const root = "http://simple.test/"
+
+	t.Run("asset on two pages of one level is requested once", func(t *testing.T) {
+		client, calls := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`
+				<a href="/a">A</a>
+				<a href="/b">B</a>
+			`),
+			root + "a": htmlReply(`
+				<script src="/script.js"></script>
+				<script src="/script.js"></script>
+				<link rel="stylesheet" href="/styles.css">
+				<img src="/image.png">
+			`),
+			root + "b": htmlReply(`
+				<script src="/script.js"></script>
+				<link rel="stylesheet" href="/styles.css">
+				<img src="/image.png">
+				<img src="/image.webp">
+			`),
+			root + "styles.css": {
+				status:        http.StatusOK,
+				contentType:   "text/css",
+				contentLength: 111,
+			},
+			root + "script.js": {
+				status:        http.StatusOK,
+				contentType:   "text/javascript",
+				contentLength: 222,
+			},
+			root + "image.png": {
+				status:        http.StatusOK,
+				contentType:   "image/png",
+				contentLength: 333,
+			},
+			root + "image.webp": {
+				status:        http.StatusOK,
+				contentType:   "image/webp",
+				contentLength: 444,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 5)
+
+		assert.Empty(t, findPage(t, pages, root).Assets)
+		a := findPage(t, pages, root+"a")
+		b := findPage(t, pages, root+"b")
+		assert.Len(t, a.Assets, 3)
+		assert.Len(t, b.Assets, 4)
+
+		script := AssetsReport{
+			URL:        root + "script.js",
+			Type:       "script",
+			StatusCode: http.StatusOK,
+			SizeBytes:  222,
+		}
+		assert.Contains(t, a.Assets, script)
+		assert.Contains(t, b.Assets, script)
+
+		assert.Equal(t, 1, calls[root+"script.js"])
+		assert.Equal(t, 1, calls[root+"styles.css"])
+		assert.Equal(t, 1, calls[root+"image.png"])
+	})
+
+	t.Run("asset shared between root and child page is requested once", func(t *testing.T) {
+		client, calls := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`
+				<a href="/a">A</a>
+				<img src="/logo.png">
+			`),
+			root + "a": htmlReply(`<img src="/logo.png">`),
+			root + "logo.png": {
+				status:        http.StatusOK,
+				contentType:   "image/png",
+				contentLength: 100,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		logo := AssetsReport{
+			URL:        root + "logo.png",
+			Type:       "image",
+			StatusCode: http.StatusOK,
+			SizeBytes:  100,
+		}
+		assert.Equal(t, []AssetsReport{logo}, findPage(t, pages, root).Assets)
+		assert.Equal(t, []AssetsReport{logo}, findPage(t, pages, root+"a").Assets)
+		assert.Equal(t, 1, calls[root+"logo.png"])
+	})
+
+	t.Run("size is taken from body without Content-Length", func(t *testing.T) {
+		body := "body { color: red; }"
+		client, _ := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`<link rel="stylesheet" href="/styles.css">`),
+			root + "styles.css": {
+				status:      http.StatusOK,
+				contentType: "text/css",
+				body:        body,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		assert.Equal(t, []AssetsReport{{
+			URL:        root + "styles.css",
+			Type:       "style",
+			StatusCode: http.StatusOK,
+			SizeBytes:  len(body),
+		}}, findPage(t, pages, root).Assets)
+	})
+
+	t.Run("asset with status >= 400 is reported with code and error", func(t *testing.T) {
+		client, calls := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`<script src="/missing.js"></script>`),
+			root + "missing.js": {
+				status: http.StatusNotFound,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		page := findPage(t, pages, root)
+
+		// TODO:  maybe it should be in broken links too?
+		assert.Empty(t, page.BrokenLinks)
+		assert.Equal(t, []AssetsReport{{
+			URL:        root + "missing.js",
+			StatusCode: http.StatusNotFound,
+			Type:       "script",
+			Error:      "404 Not Found",
+		}}, page.Assets)
+		assert.Equal(t, 1, calls[root+"missing.js"])
+	})
+
+	t.Run("shared asset is listed once per page on deeper levels", func(t *testing.T) {
+		client, calls := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`
+				<a href="/a">A</a>
+				<a href="/b">B</a>
+				<img src="/logo.png">
+			`),
+			root + "a": htmlReply(`
+				<img src="/logo.png">
+				<a href="/c">C</a>
+			`),
+			root + "b": htmlReply(`<img src="/logo.png">`),
+			root + "c": htmlReply(`
+				<img src="/logo.png">
+				<a href="/d">D</a>
+			`),
+			root + "d": htmlReply(`<img src="/logo.png">`),
+			root + "logo.png": {
+				status:        http.StatusOK,
+				contentType:   "image/png",
+				contentLength: 100,
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 3, 1)
+
+		require.Len(t, pages, 5)
+		logo := AssetsReport{
+			URL:        root + "logo.png",
+			Type:       "image",
+			StatusCode: http.StatusOK,
+			SizeBytes:  100,
+		}
+		for _, p := range pages {
+			assert.Equal(t, []AssetsReport{logo}, p.Assets, p.URL)
+		}
+		assert.Equal(t, 1, calls[root+"logo.png"])
+	})
+
+	t.Run("asset with network error keeps type and error", func(t *testing.T) {
+		client, _ := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`<img src="https://cdn.test/logo.png">`),
+			"https://cdn.test/logo.png": {
+				err: errors.New("connection refused"),
+			},
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		assets := findPage(t, pages, root).Assets
+		require.Len(t, assets, 1)
+		assert.Equal(t, "https://cdn.test/logo.png", assets[0].URL)
+		assert.Equal(t, "image", assets[0].Type)
+		assert.Zero(t, assets[0].StatusCode)
+		assert.Zero(t, assets[0].SizeBytes)
+		assert.Contains(t, assets[0].Error, "connection refused")
+	})
+
+	t.Run("link without rel stylesheet is not an asset", func(t *testing.T) {
+		client, _ := newStubClient(t, map[string]stubReply{
+			root: htmlReply(`
+				<link rel="alternate" hreflang="en" href="/en/">
+				<a href="/en/">EN</a>
+			`),
+			root + "en/": htmlReply(`<p>english</p>`),
+		})
+
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 2, 1)
+
+		assert.Empty(t, findPage(t, pages, root).Assets)
+		assert.Equal(t, 1, findPage(t, pages, root+"en/").Depth)
 	})
 }

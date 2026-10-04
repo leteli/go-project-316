@@ -19,7 +19,7 @@ func extractedURLs(t *testing.T, markup, base string) []string {
 
 	urls := make([]string, len(links))
 	for i, l := range links {
-		urls[i] = l.String()
+		urls[i] = l.link.String()
 	}
 	return urls
 }

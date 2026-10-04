@@ -20,13 +20,18 @@ var LinkAttrByNode = map[atom.Atom]string{
 	atom.Iframe: "src",
 }
 
-func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]*url.URL, error) {
+type LinkData struct {
+	link      *url.URL
+	assetType string
+}
+
+func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]LinkData, error) {
 	baseURL, err := url.Parse(rawBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse url %s: %w", rawBaseURL, err)
 	}
 
-	var links []*url.URL
+	var linksData []LinkData
 
 	uniqueLinks := map[string]struct{}{
 		normalizeAbsURL(baseURL).String(): {},
@@ -74,11 +79,15 @@ func ExtractHTTPLinksFromHTML(doc *html.Node, rawBaseURL string) ([]*url.URL, er
 				break
 			}
 			uniqueLinks[dedupLink] = struct{}{}
-			links = append(links, fullLink)
+
+			linksData = append(linksData, LinkData{
+				link:      fullLink,
+				assetType: getAssetType(n),
+			})
 			break
 		}
 	}
-	return links, nil
+	return linksData, nil
 }
 
 func normalizeAbsURL(webURL *url.URL) *url.URL {
@@ -100,4 +109,20 @@ func resolveURL(pathStr string, abs *url.URL) *url.URL {
 	}
 	resolved := abs.ResolveReference(ref)
 	return resolved
+}
+
+func getAssetType(n *html.Node) string {
+	switch n.Data {
+	case "script":
+		return "script"
+	case "img":
+		return "image"
+	case "link":
+		for _, a := range n.Attr {
+			if a.Key == "rel" && a.Val == "stylesheet" {
+				return "style"
+			}
+		}
+	}
+	return ""
 }

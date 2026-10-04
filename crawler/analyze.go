@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +69,10 @@ type Crawler struct {
 	rootURL               string
 	parsedRootURL         *url.URL
 	uniqueActivePageLinks map[string]struct{}
+	uniqueAssets          map[string]AssetsReport
+	uniqueBrokenLinks     map[string]BrokenLinkReport
+	processingLinks       map[string]struct{}
+	dedupLinks            map[string][]int
 	maxDepth              int
 	rateLimiter           *HTTPRateLimiter
 	workers               int
@@ -107,8 +111,12 @@ func newCrawler(rootURL string, depth, workers int, rl *HTTPRateLimiter) (*Crawl
 		uniqueActivePageLinks: map[string]struct{}{
 			normalizeAbsURL(u).String(): {},
 		},
-		rateLimiter: rl,
-		workers:     workers,
+		uniqueAssets:      make(map[string]AssetsReport, 0),
+		uniqueBrokenLinks: make(map[string]BrokenLinkReport, 0),
+		processingLinks:   make(map[string]struct{}, 0),
+		dedupLinks:        make(map[string][]int, 0),
+		rateLimiter:       rl,
+		workers:           workers,
 	}, nil
 }
 
@@ -159,6 +167,7 @@ type PageReport struct {
 	Error       string             `json:"error"`
 	BrokenLinks []BrokenLinkReport `json:"broken_links"`
 	SEO         SEO                `json:"seo"`
+	Assets      []AssetsReport     `json:"assets"`
 }
 
 type BrokenLinkReport struct {
@@ -173,12 +182,13 @@ type ReqParams struct {
 }
 
 type LinkParams struct {
-	url               string
-	dedupURL          string
-	checkInternalPage bool
-	isRoot            bool
-	depth             int
-	parentIndex       int
+	url         string
+	dedupURL    string
+	assetType   string
+	isInternal  bool
+	isRoot      bool
+	depth       int
+	parentIndex int
 }
 
 type LinkResult struct {
@@ -192,11 +202,22 @@ type LinkResult struct {
 	parentIndex   int
 	childrenLinks []LinkParams
 	SEO           SEO
+	AssetType     string
+	Size          int
+}
+
+type AssetsReport struct {
+	URL        string `json:"url"`
+	Type       string `json:"type"`
+	StatusCode int    `json:"status_code"`
+	SizeBytes  int    `json:"size_bytes"`
+	Error      string `json:"error"`
 }
 
 var (
 	KindBroken       = "broken"
 	KindInternalPage = "internal_page"
+	KindAsset        = "asset"
 )
 
 func (c *Crawler) buildReport(ctx context.Context) Report {
@@ -209,10 +230,11 @@ func (c *Crawler) buildReport(ctx context.Context) Report {
 	var currentLevel int
 	tasks := []LinkParams{
 		{
-			url:      c.rootURL,
-			dedupURL: normalizeAbsURL(c.parsedRootURL).String(), checkInternalPage: true,
-			depth:  currentLevel,
-			isRoot: true,
+			url:        c.rootURL,
+			dedupURL:   normalizeAbsURL(c.parsedRootURL).String(),
+			isInternal: true,
+			depth:      currentLevel,
+			isRoot:     true,
 		},
 	}
 	for currentLevel <= c.maxDepth {
@@ -224,27 +246,16 @@ func (c *Crawler) buildReport(ctx context.Context) Report {
 	}
 
 	if ctx.Err() != nil {
-		return report
+		return sortReportLinks(report)
 	}
 	if len(tasks) == 0 {
-		return report
+		return sortReportLinks(report)
 	}
 	for i := range tasks {
-		tasks[i].checkInternalPage = false
+		tasks[i].isInternal = false
 	}
 	c.levelHandler(ctx, &report, currentLevel, tasks)
-	slices.SortFunc(report.Pages, func(a, b PageReport) int {
-		if a.Depth != b.Depth {
-			return cmp.Compare(a.Depth, b.Depth)
-		}
-		return cmp.Compare(a.URL, b.URL)
-	})
-	for i := range report.Pages {
-		slices.SortFunc(report.Pages[i].BrokenLinks, func(a, b BrokenLinkReport) int {
-			return cmp.Compare(a.URL, b.URL)
-		})
-	}
-	return report
+	return sortReportLinks(report)
 }
 
 func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, tasks []LinkParams) []LinkParams {
@@ -254,7 +265,6 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 	var wg sync.WaitGroup
 
 	var nextLevelTasks = make([]LinkParams, 0)
-	var dedupNextLevelPages = make(map[string]struct{})
 
 	wg.Add(c.workers)
 	for range c.workers {
@@ -285,19 +295,38 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 		if ctx.Err() != nil {
 			return nextLevelTasks
 		}
-		if res.Kind == KindBroken {
+		switch res.Kind {
+		case KindBroken:
 			valueExists := len(report.Pages) >= res.parentIndex+1 && report.Pages[res.parentIndex].BrokenLinks != nil
 			if !valueExists {
 				continue
 			}
-			report.Pages[res.parentIndex].BrokenLinks = append(report.Pages[res.parentIndex].BrokenLinks, BrokenLinkReport{
+			brokenLinkReport := BrokenLinkReport{
 				URL:        res.URL,
 				StatusCode: res.StatusCode,
 				Error:      res.Error,
-			})
+			}
+			report.Pages[res.parentIndex].BrokenLinks = append(report.Pages[res.parentIndex].BrokenLinks, brokenLinkReport)
+			c.uniqueBrokenLinks[res.DedupURL] = brokenLinkReport
 			continue
-		}
-		if res.Kind == KindInternalPage {
+
+		case KindAsset:
+			valueExists := len(report.Pages) >= res.parentIndex+1 && report.Pages[res.parentIndex].Assets != nil
+
+			if !valueExists {
+				continue
+			}
+			assetReport := AssetsReport{
+				URL:        res.URL,
+				StatusCode: res.StatusCode,
+				Type:       res.AssetType,
+				SizeBytes:  res.Size,
+				Error:      res.Error,
+			}
+			report.Pages[res.parentIndex].Assets = append(report.Pages[res.parentIndex].Assets, assetReport)
+			c.uniqueAssets[res.DedupURL] = assetReport
+
+		case KindInternalPage:
 			pageReport := PageReport{
 				URL:         res.URL,
 				Depth:       res.Depth,
@@ -306,33 +335,58 @@ func (c *Crawler) levelHandler(ctx context.Context, report *Report, level int, t
 				Error:       res.Error,
 				BrokenLinks: make([]BrokenLinkReport, 0),
 				SEO:         res.SEO,
-			}
-			report.Pages = append(report.Pages, pageReport)
-			c.uniqueActivePageLinks[res.DedupURL] = struct{}{}
-			chL := len(res.childrenLinks)
-			if chL == 0 {
-				continue
+				Assets:      make([]AssetsReport, 0),
 			}
 			for _, ch := range res.childrenLinks {
 				if _, ok := c.uniqueActivePageLinks[ch.dedupURL]; ok {
 					continue
 				}
-
-				ch.parentIndex = len(report.Pages) - 1
-				if ch.checkInternalPage {
-					if _, ok := dedupNextLevelPages[ch.dedupURL]; ok {
-						continue
-					}
-					dedupNextLevelPages[ch.dedupURL] = struct{}{}
-					ch.depth = level + 1
-				} else {
-					ch.depth = level
+				if asset, ok := c.uniqueAssets[ch.dedupURL]; ok {
+					pageReport.Assets = append(pageReport.Assets, asset)
+					continue
 				}
-				nextLevelTasks = append(nextLevelTasks, ch)
+				if brLink, ok := c.uniqueBrokenLinks[ch.dedupURL]; ok {
+					pageReport.BrokenLinks = append(pageReport.BrokenLinks, brLink)
+					continue
+				}
+
+				ch.parentIndex = len(report.Pages)
+				ch.depth = level + 1
+
+				if _, ok := c.processingLinks[ch.dedupURL]; !ok {
+					nextLevelTasks = append(nextLevelTasks, ch)
+					c.processingLinks[ch.dedupURL] = struct{}{}
+					continue
+				}
+
+				c.dedupLinks[ch.dedupURL] = append(c.dedupLinks[ch.dedupURL], ch.parentIndex)
 			}
+			report.Pages = append(report.Pages, pageReport)
+			c.uniqueActivePageLinks[res.DedupURL] = struct{}{}
 		}
 	}
+	c.attachResolvedLinks(report)
 	return nextLevelTasks
+}
+
+func (c *Crawler) attachResolvedLinks(report *Report) {
+	for k, v := range c.dedupLinks {
+		br, ok := c.uniqueBrokenLinks[k]
+		if ok {
+			for _, parentIdx := range v {
+				report.Pages[parentIdx].BrokenLinks = append(report.Pages[parentIdx].BrokenLinks, br)
+			}
+			delete(c.dedupLinks, k)
+			continue
+		}
+		asset, ok := c.uniqueAssets[k]
+		if ok {
+			for _, parentIdx := range v {
+				report.Pages[parentIdx].Assets = append(report.Pages[parentIdx].Assets, asset)
+			}
+			delete(c.dedupLinks, k)
+		}
+	}
 }
 
 func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult {
@@ -343,7 +397,7 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		parentIndex: params.parentIndex,
 	}
 	method := http.MethodHead
-	if params.checkInternalPage {
+	if params.isInternal || params.assetType != "" {
 		method = http.MethodGet
 	}
 	resp, err := c.rateLimiter.runThrottledRequestWithRetries(ctx, ReqParams{
@@ -357,6 +411,9 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		case ctx.Err() != nil:
 		case params.isRoot:
 			linkResult.Kind = KindInternalPage
+		case params.assetType != "":
+			linkResult.Kind = KindAsset
+			linkResult.AssetType = params.assetType
 		default:
 			linkResult.Kind = KindBroken
 		}
@@ -366,19 +423,36 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 	}()
-	if params.isRoot || (params.checkInternalPage && isHTMLPage(resp)) {
+
+	if params.isRoot || (params.isInternal && isHTMLPage(resp)) {
 		linkResult.Kind = KindInternalPage
 	}
+
 	linkResult.StatusCode = resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if !params.isRoot {
 			linkResult.Kind = KindBroken
 		}
+		if params.assetType != "" {
+			linkResult.Kind = KindAsset
+			linkResult.AssetType = params.assetType
+		}
 		linkResult.Status = "error"
 		linkResult.Error = resp.Status
 		return linkResult
 	}
-	if !params.checkInternalPage {
+
+	if params.assetType != "" {
+		linkResult.Kind = KindAsset
+		linkResult.AssetType = params.assetType
+		size, err := getAssetSize(resp)
+		if err != nil {
+			linkResult.Error = err.Error()
+		}
+		linkResult.Size = size
+		return linkResult
+	}
+	if !params.isInternal {
 		return linkResult
 	}
 	if !isHTMLPage(resp) {
@@ -399,7 +473,7 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 	linkResult.SEO = AnalyzeSEO(doc)
 
 	resolvedURL := resp.Request.URL
-	links, err := ExtractHTTPLinksFromHTML(
+	linksData, err := ExtractHTTPLinksFromHTML(
 		doc,
 		resolvedURL.String(),
 	)
@@ -409,13 +483,15 @@ func (c *Crawler) analyzeLink(ctx context.Context, params LinkParams) LinkResult
 		return linkResult
 	}
 	linkResult.Status = "ok"
-	linkResult.childrenLinks = make([]LinkParams, len(links))
-	for i, l := range links {
-		linkResult.childrenLinks[i] = LinkParams{
-			url:               l.String(),
-			dedupURL:          normalizeAbsURL(l).String(),
-			checkInternalPage: l.Hostname() == c.parsedRootURL.Hostname(),
+	linkResult.childrenLinks = make([]LinkParams, len(linksData))
+	for i, l := range linksData {
+		lp := LinkParams{
+			url:        l.link.String(),
+			dedupURL:   normalizeAbsURL(l.link).String(),
+			isInternal: l.link.Hostname() == c.parsedRootURL.Hostname(),
+			assetType:  l.assetType,
 		}
+		linkResult.childrenLinks[i] = lp
 	}
 	return linkResult
 }
@@ -510,8 +586,11 @@ func isValidWebURL(u *url.URL) bool {
 }
 
 func isHTMLPage(res *http.Response) bool {
-	contentType := res.Header.Get("Content-Type")
-	return strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/xhtml+xml")
+	mediaType, _, err := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
 }
 
 func toFormattedJSON(v Report) ([]byte, error) {
@@ -544,4 +623,34 @@ func backoff(attempt int) time.Duration {
 
 func jitter(d time.Duration) time.Duration {
 	return time.Duration(rand.Int63n(int64(d)))
+}
+
+func getAssetSize(res *http.Response) (int, error) {
+	cL := res.ContentLength
+	if cL > -1 {
+		return int(cL), nil
+	}
+	size, err := io.Copy(io.Discard, res.Body)
+	if err != nil {
+		return 0, err
+	}
+	return int(size), nil
+}
+
+func sortReportLinks(report Report) Report {
+	slices.SortFunc(report.Pages, func(a, b PageReport) int {
+		if a.Depth != b.Depth {
+			return cmp.Compare(a.Depth, b.Depth)
+		}
+		return cmp.Compare(a.URL, b.URL)
+	})
+	for i := range report.Pages {
+		slices.SortFunc(report.Pages[i].BrokenLinks, func(a, b BrokenLinkReport) int {
+			return cmp.Compare(a.URL, b.URL)
+		})
+		slices.SortFunc(report.Pages[i].Assets, func(a, b AssetsReport) int {
+			return cmp.Compare(a.URL, b.URL)
+		})
+	}
+	return report
 }
