@@ -619,7 +619,7 @@ func TestAnalyzeAssets(t *testing.T) {
 			},
 		})
 
-		pages := analyzePagesWithAssets(t, context.Background(), root, client, 3, 1)
+		pages := analyzePagesWithAssets(t, context.Background(), root, client, 4, 1)
 
 		require.Len(t, pages, 5)
 		logo := AssetsReport{

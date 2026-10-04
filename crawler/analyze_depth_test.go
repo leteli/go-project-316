@@ -203,20 +203,25 @@ func TestAnalyzeDepthLimitAndSEO(t *testing.T) {
 			want:  map[string]int{depthRootURL: 0},
 		},
 		{
-			name:  "one - root and direct children",
+			name:  "one - root only",
 			depth: 1,
+			want:  map[string]int{depthRootURL: 0},
+		},
+		{
+			name:  "two - root and direct children",
+			depth: 2,
 			want:  map[string]int{depthRootURL: 0, a: 1, b: 1},
 		},
 		{
-			name:  "two - includes grandchildren",
-			depth: 2,
+			name:  "three - includes grandchildren",
+			depth: 3,
 			want: map[string]int{
 				depthRootURL: 0, a: 1, b: 1, c: 2,
 			},
 		},
 		{
-			name:  "three - includes last level",
-			depth: 3,
+			name:  "four - includes last level",
+			depth: 4,
 			want: map[string]int{
 				depthRootURL: 0, a: 1, b: 1, c: 2, d: 3, e: 3,
 			},
@@ -306,7 +311,7 @@ func TestAnalyzeDepthUsesShortestDistance(t *testing.T) {
 		leaf:         depthPage("Leaf"),
 	}
 
-	for _, limit := range []int{2, 3} {
+	for _, limit := range []int{3, 4} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(
 				context.Background(), 3*time.Second,

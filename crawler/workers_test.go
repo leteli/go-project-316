@@ -113,6 +113,7 @@ func TestLevelIsProcessedByWholeWorkerPool(t *testing.T) {
 
 	srv, rec := newGraphSite(t, pages)
 	opts := baseOpts(srv.URL)
+	opts.Depth = 2
 	opts.Concurrency = workers
 
 	start := time.Now()

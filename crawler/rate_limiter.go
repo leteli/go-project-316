@@ -3,12 +3,10 @@ package crawler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 )
@@ -128,10 +126,8 @@ func (r *HTTPRateLimiter) makeHTTPRequest(ctx context.Context, params ReqParams)
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "request error: url=%v", err)
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "request: url=%s; method=%s; code=%d", params.url, params.method, resp.StatusCode)
 	return resp, nil
 }
 
